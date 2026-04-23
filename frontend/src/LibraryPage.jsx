@@ -40,12 +40,12 @@ import {
   Gamepad, Plus, Clock, AlertTriangle, ChevronDown,
 } from "lucide-react";
 import {
-  truncate, ratingColor, persistLibraryItem, MOCK_USER_ID, XP_EVENTS,
+  truncate, ratingColor, XP_EVENTS,
   getLevel, getTitle, getXpProgress,
   computeDNAScores, normaliseDNA, DNA_GENRES,
 } from "./shared.js";
+import { persistLibraryItemFS } from "./firebaseLibrary.js";
 import DNABlade      from "./DNABlade.jsx";
-import GameDetailOverlay from "./GameDetailOverlay.jsx";
 
 /* ── DNA offset helper (mirrors App.jsx) ────────────────────────────────────── */
 function applyDnaOffsets(library, offsets) {
@@ -136,7 +136,7 @@ const LibGameCard = memo(function LibGameCard({
       <div
         className="lib-card-image"
         style={{ cursor: "pointer" }}
-        onClick={() => onOpenOverlay?.(game.id)}
+        onClick={() => onOpenOverlay?.({ id: game.id, name: game.name, background_image: game.background_image })}
       >
         {game.background_image
           ? <img src={game.background_image} alt={game.name} loading="lazy" />
@@ -159,7 +159,7 @@ const LibGameCard = memo(function LibGameCard({
       <div className="lib-card-body">
         <h3
           className="lib-card-title"
-          onClick={() => onOpenOverlay?.(game.id)}
+          onClick={() => onOpenOverlay?.({ id: game.id, name: game.name, background_image: game.background_image })}
           style={{ cursor: "pointer" }}
         >
           {truncate(game.name, 30)}
@@ -345,13 +345,14 @@ export default function LibraryPage({
   dnaOffsets = {}, onDnaOffsetsChange = () => {},
   xp, onXpGain,
   onBack,
+  onGameClick, // New prop
+  user,
 }) {
   const [activeTab,      setActiveTab]      = useState("playing");
   const [tabSearch,      setTabSearch]      = useState({
     playing: "", wishlist: "", played: "", liked: "", favorites: "",
   });
   const [bladeCollapsed, setBladeCollapsed] = useState(false);
-  const [overlayGameId,  setOverlayGameId]  = useState(null);
   /* Fix #4: year filter and scroll refs */
   const [yearFilter,     setYearFilter]     = useState("all");
   const yearRefs  = useRef({});
@@ -450,7 +451,7 @@ export default function LibraryPage({
     onDnaWeightsChange(applyDnaOffsets(next, dnaOffsets));
 
     // 3. Persist to DB
-    persistLibraryItem(MOCK_USER_ID, {
+    persistLibraryItemFS(user?.uid, {
       ...entry.game,
       game_id: entry.game.id,
       game_name: entry.game.name,
@@ -484,7 +485,7 @@ export default function LibraryPage({
 
   const handleAddHours = useCallback((entry, hours) => {
     dispatch({ type: "ADD_PLAYTIME", gameId: entry.game.id, game: entry.game, hours });
-    persistLibraryItem(MOCK_USER_ID, {
+    persistLibraryItemFS(user?.uid, {
       game_id:     entry.game.id,
       game_name:   entry.game.name,
       genres:      entry.game.genre_slugs  ?? [],
@@ -720,7 +721,7 @@ export default function LibraryPage({
                     onRemove={handleRemove}
                     onFavorite={handleFavorite}
                     onAddHours={handleAddHours}
-                    onOpenOverlay={setOverlayGameId}
+                    onOpenOverlay={onGameClick}
                   />
                 ) : (
                   /* Flat grid when search/year-filter is active */
@@ -734,7 +735,7 @@ export default function LibraryPage({
                           onRemove={handleRemove}
                           onFavorite={handleFavorite}
                           onAddHours={handleAddHours}
-                          onOpenOverlay={setOverlayGameId}
+                          onOpenOverlay={onGameClick}
                         />
                       ))}
                     </AnimatePresence>
@@ -767,19 +768,6 @@ export default function LibraryPage({
 
       </div>{/* end library-layout */}
 
-      {/* Cyber-Portal overlay — keyed on overlayGameId so memo re-uses same instance */}
-      <AnimatePresence>
-        {overlayGameId && (
-          <GameDetailOverlay
-            key={overlayGameId}
-            gameId={overlayGameId}
-            library={library}
-            dispatch={dispatch}
-            addToast={addToast}
-            onClose={() => setOverlayGameId(null)}
-          />
-        )}
-      </AnimatePresence>
     </div>
   );
 }

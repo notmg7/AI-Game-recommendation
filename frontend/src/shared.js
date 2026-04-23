@@ -13,27 +13,25 @@ export const RETRO_CLASSICS_SLUG = "__retro_classics__";
 export const INITIAL_LIBRARY_STATE = new Map();
 
 export const GENRES = [
-  { slug: "",                         label: "All Games",   icon: "◈" },
-  { slug: "action",                   label: "Action",      icon: "⚔" },
-  { slug: "role-playing-games-rpg",   label: "RPG",         icon: "🗡" },
-  { slug: "strategy",                 label: "Strategy",    icon: "♟" },
-  { slug: "shooter",                  label: "Shooter",     icon: "◎" },
-  { slug: "adventure",                label: "Adventure",   icon: "◬" },
-  { slug: "puzzle",                   label: "Puzzle",      icon: "◧" },
-  { slug: "sports",                   label: "Sports",      icon: "◉" },
-  { slug: "racing",                   label: "Racing",      icon: "▷" },
-  { slug: "simulation",               label: "Simulation",  icon: "◫" },
-  { slug: "indie",                    label: "Indie",       icon: "◌" },
+  { slug: "",             label: "All Games",   icon: "◈" },
+  { slug: "action",       label: "Action",      icon: "◈" },
+  { slug: "strategy",     label: "Strategy",    icon: "♟" },
+  { slug: "rpg",          label: "RPG",         icon: "🗡" },
+  { slug: "adventure",    label: "Adventure",   icon: "◬" },
+  { slug: "simulation",   label: "Simulation",  icon: "◫" },
+  { slug: "sports",       label: "Sports",      icon: "◉" },
+  { slug: "puzzle",       label: "Puzzle",      icon: "◧" },
+  { slug: "indie",        label: "Indie",       icon: "◌" },
 ];
 
 export const DNA_GENRES = [
-  { slug: "action",     label: "Action"     },
-  { slug: "rpg",        label: "RPG"        },
+  { slug: "action",     label: "Action" },
   { slug: "strategy",   label: "Strategy"   },
-  { slug: "shooter",    label: "Shooter"    },
+  { slug: "rpg",        label: "RPG"        },
   { slug: "adventure",  label: "Adventure"  },
-  { slug: "puzzle",     label: "Puzzle"     },
   { slug: "simulation", label: "Simulation" },
+  { slug: "sports",     label: "Sports"    },
+  { slug: "puzzle",     label: "Puzzle"     },
   { slug: "indie",      label: "Indie"      },
 ];
 
@@ -96,8 +94,8 @@ export const truncate = (str = "", n) =>
   str.length > n ? str.slice(0, n).trimEnd() + "…" : str;
 
 export const ratingColor = (r) => {
-  if (r >= 4.2) return "var(--accent-green)";
-  if (r >= 3.5) return "var(--accent-amber)";
+  if (r >= 8.4) return "var(--accent-green)";
+  if (r >= 7.0) return "var(--accent-amber)";
   return "var(--accent-red)";
 };
 
@@ -127,15 +125,17 @@ export function computeDNAScores(library) {
   if (!(library instanceof Map) || library.size === 0) return scores;
 
   const slugMap = {
-    "role-playing-games-rpg": "rpg",
-    "rpg":        "rpg",
     "action":     "action",
+    "rpg":        "rpg",
     "strategy":   "strategy",
-    "shooter":    "shooter",
+    "sports":     "sports",
     "adventure":  "adventure",
     "puzzle":     "puzzle",
     "simulation": "simulation",
     "indie":      "indie",
+    "platformer": "action",
+    "shooter":    "sports",
+    "role-playing-games-rpg": "rpg",
   };
 
   for (const entry of library.values()) {
@@ -173,6 +173,37 @@ export function normaliseDNA(rawScores) {
 
 export function libraryToDNA(library) {
   return normaliseDNA(computeDNAScores(library));
+}
+
+export function calculateMatchPercentage(game, dnaWeights) {
+  if (!game || !game.genre_slugs || !dnaWeights) return null;
+  const slugs = Array.isArray(game.genre_slugs) ? game.genre_slugs : (typeof game.genres === 'string' ? JSON.parse(game.genres || "[]").map(g => g.slug) : []);
+  if (slugs.length === 0) return null;
+
+  const slugMap = {
+    "action":     "action",
+    "rpg":        "rpg",
+    "strategy":   "strategy",
+    "sports":     "sports",
+    "adventure":  "adventure",
+    "puzzle":     "puzzle",
+    "simulation": "simulation",
+    "indie":      "indie",
+    "platformer": "action",
+    "shooter":    "sports",
+    "role-playing-games-rpg": "rpg",
+  };
+
+  let maxWeight = 0;
+  for (const rawSlug of slugs) {
+    const dnaSlug = slugMap[rawSlug] || rawSlug;
+    if (dnaWeights[dnaSlug] && dnaWeights[dnaSlug] > maxWeight) {
+      maxWeight = dnaWeights[dnaSlug];
+    }
+  }
+
+  if (maxWeight > 0) return Math.round(maxWeight);
+  return null;
 }
 
 /* ─── Library Reducer ────────────────────────────────────────────────────────── */
@@ -257,7 +288,8 @@ export const libraryReducer = (state, action) => {
             name:             row.game_name,
             genre_slugs:      slugs,
             rating:           row.rating ?? null,
-            background_image: row.background_image ?? null,
+            image_url:        row.image_url ?? null,
+            background_image: row.image_url ?? row.background_image ?? null,
             released:         row.released ?? null,
           },
           status:     row.status      ?? null,
@@ -300,6 +332,7 @@ export function useInfiniteGames({
   genre            = "",
   userId           = "",
   dnaWeights       = null,
+  dnaOffsets       = null,
   discoveryMode    = false,
   ordering         = "",
   metacritic       = "",
@@ -313,6 +346,7 @@ export function useInfiniteGames({
   year             = "",
   ratingMin        = 0,
   excludeIds       = [], 
+  salt             = 0,
 }) {
   const [games,       setGames]       = useState([]);
   const [totalCount,  setTotalCount]  = useState(0);
@@ -325,12 +359,16 @@ export function useInfiniteGames({
   const fetchKeyRef = useRef(0);
   const [retryTick, setRetryTick]    = useState(0);
 
-  // ── FIX: Use Refs for DNA and Exclusions so likes don't trigger a reset ──
-  const weightsRef = useRef(dnaWeights);
+  // ── FIX: Use Ref for Exclusions so likes don't trigger a reset (unless manual) ──
   const excludeRef = useRef(excludeIds);
-  
-  useEffect(() => { weightsRef.current = dnaWeights; }, [dnaWeights]);
   useEffect(() => { excludeRef.current = excludeIds; }, [excludeIds]);
+
+  // ── FIX: Use Ref for DNA Weights so likes don't trigger a reset (unless manual) ──
+  const dnaRef = useRef(dnaWeights);
+  useEffect(() => { dnaRef.current = dnaWeights; }, [dnaWeights]);
+
+  const offsetRef = useRef(dnaOffsets);
+  useEffect(() => { offsetRef.current = dnaOffsets; }, [dnaOffsets]);
 
   const fetchPage = useCallback(async (pageNum, isReset) => {
     const myKey = ++fetchKeyRef.current;
@@ -361,10 +399,16 @@ export function useInfiniteGames({
       if (discoveryMode && userId) {
         params.set("user_id", userId);
         params.set("discovery_mode", "true");
-        const currentWeights = weightsRef.current;
-        if (currentWeights) {
-          for (const [s, v] of Object.entries(currentWeights)) {
+        const currentDna = dnaRef.current;
+        if (currentDna) {
+          for (const [s, v] of Object.entries(currentDna)) {
             if (typeof v === "number") params.set(`gw_${s}`, String(v));
+          }
+        }
+        const currentOffsets = offsetRef.current;
+        if (currentOffsets) {
+          for (const [s, v] of Object.entries(currentOffsets)) {
+            if (v !== 0) params.set(`offset_${s}`, String(v));
           }
         }
       }
@@ -387,11 +431,11 @@ export function useInfiniteGames({
       if (myKey === fetchKeyRef.current) { setLoading(false); setLoadingMore(false); }
     }
   }, [
-    /* DNA and excludeIds REMOVED from dependencies to stop the jumping! */
-    searchQuery, genre, userId, discoveryMode, ordering, metacritic, dates, tags, retryTick,
+    searchQuery, genre, userId, discoveryMode, ordering, metacritic, dates, tags, retryTick, salt,
     JSON.stringify(platformIds), JSON.stringify(genreIds),
     JSON.stringify(companyIds), JSON.stringify(themeIds),
     JSON.stringify(collectionIds), year, ratingMin,
+    // Removed dnaWeights from here to prevent auto-reset
   ]);
 
   // ── Manual Refresh Function ──

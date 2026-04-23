@@ -40,43 +40,51 @@ import {
   Monitor, ShoppingCart, Tag, LayoutGrid, Layers,
   Users, Building2, Calendar, Trophy,
   ExternalLink, ChevronUp, Image as ImageIcon,
+  Eye, EyeOff,
 } from "lucide-react";
 import useSound from "use-sound";
 
 import {
-  API_BASE, MOCK_USER_ID, GENRES,
+  API_BASE, GENRES,
   TIMELINE_LATEST, TIMELINE_UPCOMING, FREE_GAMES_SLUG,
   RETRO_CLASSICS_SLUG,
-  truncate, ratingColor, isNewRelease, persistLibraryItem,
+  truncate, ratingColor, isNewRelease,
   libraryReducer, useToast, useInfiniteGames, useHubData,
-  computeDNAScores, normaliseDNA,
+  computeDNAScores, normaliseDNA, calculateMatchPercentage,
   getLevel, getTitle, getXpProgress, XP_EVENTS,
   DNA_GENRES,
 } from "./shared.js";
 
-import DNABlade     from "./DNABlade.jsx";
-import GlitchPet    from "./GlitchPet.jsx";
+import DNABlade from "./DNABlade.jsx";
+import GlitchPet from "./GlitchPet.jsx";
 import HeroCarousel from "./HeroCarousel.jsx";
-import LibraryPage  from "./LibraryPage.jsx";
+import LibraryPage from "./LibraryPage.jsx";
+import {
+  useFirebaseUser, logoutUser, loginAsGuest, loginWithGoogle,
+  loginWithEmail, registerUser, useOTP, linkAccounts
+} from "./useAuth.js";
+import { fetchLibraryFS, persistLibraryItemFS, saveDNAWeightsFS } from "./firebaseLibrary.js";
+import { signOut } from "firebase/auth";
+import { auth } from "./firebase.js";
 
 /* ── Sound paths ─────────────────────────────────────────────────────────────── */
 const SFX = {
-  hum1:   "/sounds/hum1.mp3",
-  hum2:   "/sounds/hum2.mp3",
-  hum3:   "/sounds/hum3.mp3",
-  chime:  "/sounds/chime.mp3",
-  dizzy:  "/sounds/dizzy.mp3",
-  sad:    "/sounds/sad.mp3",
+  hum1: "/sounds/hum1.mp3",
+  hum2: "/sounds/hum2.mp3",
+  hum3: "/sounds/hum3.mp3",
+  chime: "/sounds/chime.mp3",
+  dizzy: "/sounds/dizzy.mp3",
+  sad: "/sounds/sad.mp3",
   glitch: "/sounds/glitch.mp3",
 };
 
 /* ── Boot stagger variants ───────────────────────────────────────────────────── */
 const bootContainer = { hidden: {}, visible: { transition: { staggerChildren: 0.08, delayChildren: 0.1 } } };
-const bootSidebar   = { hidden: { x: -60, opacity: 0 }, visible: { x: 0, opacity: 1, transition: { duration: 0.35, ease: [0.16,1,0.3,1] } } };
-const bootMain      = { hidden: { opacity: 0, y: 20 },  visible: { opacity: 1, y: 0,  transition: { duration: 0.35, ease: [0.16,1,0.3,1] } } };
-const bootBlade     = { hidden: { x: 60, opacity: 0 },  visible: { x: 0, opacity: 1,  transition: { duration: 0.35, ease: [0.16,1,0.3,1] } } };
-const bootCard      = { hidden: { scale: 0.88, opacity: 0 }, visible: { scale: 1, opacity: 1, transition: { duration: 0.25, ease: [0.16,1,0.3,1] } } };
-const bootGrid      = { hidden: {}, visible: { transition: { staggerChildren: 0.04, delayChildren: 0.3 } } };
+const bootSidebar = { hidden: { x: -60, opacity: 0 }, visible: { x: 0, opacity: 1, transition: { duration: 0.35, ease: [0.16, 1, 0.3, 1] } } };
+const bootMain = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.16, 1, 0.3, 1] } } };
+const bootBlade = { hidden: { x: 60, opacity: 0 }, visible: { x: 0, opacity: 1, transition: { duration: 0.35, ease: [0.16, 1, 0.3, 1] } } };
+const bootCard = { hidden: { scale: 0.88, opacity: 0 }, visible: { scale: 1, opacity: 1, transition: { duration: 0.25, ease: [0.16, 1, 0.3, 1] } } };
+const bootGrid = { hidden: {}, visible: { transition: { staggerChildren: 0.05, delayChildren: 0.1 } } };
 
 /* ── DNA offset helper ───────────────────────────────────────────────────────── */
 function applyDnaOffsets(library, offsets) {
@@ -89,53 +97,53 @@ function applyDnaOffsets(library, offsets) {
 }
 
 /* ── Date helpers ────────────────────────────────────────────────────────────── */
-function getTodayStr()    { return new Date().toISOString().split("T")[0]; }
+function getTodayStr() { return new Date().toISOString().split("T")[0]; }
 function getTomorrowStr() { const d = new Date(); d.setDate(d.getDate() + 1); return d.toISOString().split("T")[0]; }
 
 /* ── Section slugs ───────────────────────────────────────────────────────────── */
-const DISCOVERY_SLUG    = "__discovery__";
-const TOP_2026_SLUG     = "__top_2026__";
+const DISCOVERY_SLUG = "__discovery__";
+const TOP_2026_SLUG = "__top_2026__";
 const POPULAR_2025_SLUG = "__popular_2025__";
-const ALL_TIME_SLUG     = "__all_time__";
+const ALL_TIME_SLUG = "__all_time__";
 
 /* ── Browse targets ─────────────────────────────────────────────────────────── */
 const BROWSE_ITEMS = [
-  { id: "platforms", label: "Platforms",      Icon: Monitor      },
-  { id: "stores",    label: "Stores",         Icon: ShoppingCart },
-  { id: "genres",    label: "Genres & Vibes", Icon: Layers       },
-  { id: "years",     label: "Years",          Icon: Calendar     },
+  { id: "platforms", label: "Platforms", Icon: Monitor },
+  { id: "stores", label: "Stores", Icon: ShoppingCart },
+  { id: "genres", label: "Genres & Vibes", Icon: Layers },
+  { id: "years", label: "Years", Icon: Calendar },
 ];
 
 /* ── Advanced Filter → IGDB filter-key mapping ─────────────────────────────── */
 const PORTAL_FILTER_MAP = {
   platforms: "platforms",
-  genres:    "genres",
-  tags:      "themes",
-  themes:    "themes",
-  years:     "years",
-  stores:    "stores",
+  genres: "genres",
+  tags: "themes",
+  themes: "themes",
+  years: "years",
+  stores: "stores",
 };
 
 /* Factory: fresh empty filter state */
 function emptyFilters() {
   return {
     platforms: new Map(),
-    genres:    new Map(),
-    themes:    new Map(),
-    years:     new Map(),
-    stores:    new Map(),
+    genres: new Map(),
+    themes: new Map(),
+    years: new Map(),
+    stores: new Map(),
   };
 }
 
 /* ── sectionToApiParams ──────────────────────────────────────────────────────── */
 function sectionToApiParams(section) {
-  if (section === TIMELINE_LATEST)     return { ordering: "-hypes,-released",          metacritic: "50,100", dates: `2024-01-01,${getTodayStr()}` };
-  if (section === TIMELINE_UPCOMING)   return { ordering: "-hypes",                    metacritic: "",        dates: `${getTomorrowStr()},2027-12-31` };
-  if (section === FREE_GAMES_SLUG)     return { ordering: "-follows",                  metacritic: "",        tags:  "free-to-play" };
-  if (section === RETRO_CLASSICS_SLUG) return { ordering: "-total_rating",             metacritic: "80,100",  dates: "1980-01-01,2005-12-31" };
-  if (section === TOP_2026_SLUG)       return { ordering: "-hypes,-total_rating",      metacritic: "70,100",  dates: `2026-01-01,${getTodayStr()}` };
-  if (section === POPULAR_2025_SLUG)   return { ordering: "-follows,-total_rating",    metacritic: "60,100",  dates: "2025-01-01,2025-12-31" };
-  if (section === ALL_TIME_SLUG)       return { ordering: "-total_rating",             metacritic: "90,100"   };
+  if (section === TIMELINE_LATEST) return { ordering: "-hypes,-released", metacritic: "50,100", dates: `2024-01-01,${getTodayStr()}` };
+  if (section === TIMELINE_UPCOMING) return { ordering: "-hypes", metacritic: "", dates: `${getTomorrowStr()},2027-12-31` };
+  if (section === FREE_GAMES_SLUG) return { ordering: "-follows", metacritic: "", tags: "free-to-play" };
+  if (section === RETRO_CLASSICS_SLUG) return { ordering: "-total_rating", metacritic: "80,100", dates: "1980-01-01,2005-12-31" };
+  if (section === TOP_2026_SLUG) return { ordering: "-hypes,-total_rating", metacritic: "70,100", dates: `2026-01-01,${getTodayStr()}` };
+  if (section === POPULAR_2025_SLUG) return { ordering: "-follows,-total_rating", metacritic: "60,100", dates: "2025-01-01,2025-12-31" };
+  if (section === ALL_TIME_SLUG) return { ordering: "-total_rating", metacritic: "90,100" };
   if (section && section !== DISCOVERY_SLUG) return { ordering: "-released,-total_rating", metacritic: "50,100" };
   return { ordering: "", metacritic: "" };
 }
@@ -155,10 +163,10 @@ function sectionToApiParams(section) {
 /* ── Sub-components ───────────────────────────────────────────────────────── */
 function CompatibilityMeter({ match, label, loading }) {
   const color =
-    match >= 90 ? "var(--accent-green)"  :
-    match >= 75 ? "var(--accent)"        :
-    match >= 55 ? "var(--accent-violet)" :
-    match >= 35 ? "var(--accent-amber)"  : "var(--text-muted)";
+    match >= 90 ? "var(--accent-green)" :
+      match >= 75 ? "var(--accent)" :
+        match >= 55 ? "var(--accent-violet)" :
+          match >= 35 ? "var(--accent-amber)" : "var(--text-muted)";
 
   if (loading) {
     return (
@@ -197,9 +205,9 @@ function CompatibilityMeter({ match, label, loading }) {
 function HltbBoxes({ hltb }) {
   if (!hltb) return null;
   const boxes = [
-    { label: "Main Story",    value: hltb.main_story,    icon: "🎯", cls: "" },
+    { label: "Main Story", value: hltb.main_story, icon: "🎯", cls: "" },
     { label: "Completionist", value: hltb.completionist, icon: "🏆", cls: "gdm-hltb-box--gold" },
-    { label: "Source",        value: hltb.source === "genre-estimate" ? "Est." : "HLTB", icon: "📊", cls: "gdm-hltb-box--dim" },
+    { label: "Source", value: hltb.source === "genre-estimate" ? "Est." : "HLTB", icon: "📊", cls: "gdm-hltb-box--dim" },
   ];
   return (
     <div className="gdm-hltb">
@@ -235,12 +243,12 @@ function TechGrid({ pcReqs, developer, esrb, platforms }) {
 
   const minText = pcReqs?.minimum || "";
   const rows = [
-    { icon: "🖥",  label: "OS",       value: parse(minText, "OS") || (platforms?.includes("PC (Microsoft Windows)") ? "Windows" : "—") },
-    { icon: "💾",  label: "Storage",  value: parse(minText, "Storage") || parse(minText, "HDD") || "—" },
-    { icon: "🧠",  label: "RAM",      value: parse(minText, "Memory") || parse(minText, "RAM") || "—" },
-    { icon: "⚙️",  label: "GPU",      value: parse(minText, "Graphics") || "—" },
-    { icon: "🏢",  label: "Dev",      value: developer?.[0] || "—" },
-    { icon: "🔞",  label: "Rating",   value: esrb || "Not Rated" },
+    { icon: "🖥", label: "OS", value: parse(minText, "OS") || (platforms?.includes("PC (Microsoft Windows)") ? "Windows" : "—") },
+    { icon: "💾", label: "Storage", value: parse(minText, "Storage") || parse(minText, "HDD") || "—" },
+    { icon: "🧠", label: "RAM", value: parse(minText, "Memory") || parse(minText, "RAM") || "—" },
+    { icon: "⚙️", label: "GPU", value: parse(minText, "Graphics") || "—" },
+    { icon: "🏢", label: "Dev", value: developer?.[0] || "—" },
+    { icon: "🔞", label: "Rating", value: esrb || "Not Rated" },
   ];
 
   const hasAnySpec = rows.some(r => r.value !== "—");
@@ -262,21 +270,21 @@ function TechGrid({ pcReqs, developer, esrb, platforms }) {
   );
 }
 
-function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose, dnaWeights }) {
-  const [fullGame,    setFullGame]    = useState(null);
+function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose, dnaWeights, user }) {
+  const [fullGame, setFullGame] = useState(null);
   const [screenshots, setScreenshots] = useState([]);
-  const [activeImg,   setActiveImg]   = useState(0);
+  const [activeImg, setActiveImg] = useState(0);
   const [dataLoading, setDataLoading] = useState(true);
-  const [imgLoading,  setImgLoading]  = useState(true);
-  const [dnaMatch,    setDnaMatch]    = useState(null);   // { match, label }
-  const [dnaLoading,  setDnaLoading]  = useState(true);
+  const [imgLoading, setImgLoading] = useState(true);
+  const [dnaMatch, setDnaMatch] = useState(null);   // { match, label }
+  const [dnaLoading, setDnaLoading] = useState(true);
 
   /* Use hydrated data when available, card data instantly for title/hero */
   const game = fullGame ?? cardGame;
 
-  const entry      = library?.get(game?.id);
-  const status     = entry?.status;
-  const isLiked    = entry?.isLiked    ?? false;
+  const entry = library?.get(game?.id);
+  const status = entry?.status;
+  const isLiked = entry?.isLiked ?? false;
   const isFavorite = entry?.isFavorite ?? false;
 
   /* ESC to close */
@@ -300,7 +308,7 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
     fetch(`${API_BASE}/games/${cardGame.id}`)
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (!cancelled && d) setFullGame(d); })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => { if (!cancelled) setDataLoading(false); });
     return () => { cancelled = true; };
   }, [cardGame?.id]);
@@ -328,32 +336,33 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
     if (!slugs?.length || !dnaWeights) { setDnaLoading(false); return; }
     let cancelled = false;
     fetch(`${API_BASE}/games/${game.id}/dna-match`, {
-      method:  "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ dnaWeights, genreSlugs: slugs }),
+      body: JSON.stringify({ dnaWeights, genreSlugs: slugs }),
     })
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (!cancelled && d) setDnaMatch(d); })
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => { if (!cancelled) setDnaLoading(false); });
     return () => { cancelled = true; };
   }, [game?.genre_slugs, dnaWeights]);
 
   const handleLibraryAction = useCallback((action) => {
     if (!game) return;
-    const current   = library?.get(game.id);
+    const current = library?.get(game.id);
     const newStatus = current?.status === action ? null : action;
     dispatch({ type: "SET_STATUS", gameId: game.id, game, status: newStatus });
-    persistLibraryItem(MOCK_USER_ID, {
+    persistLibraryItemFS(user.uid, {
       game_id: game.id, game_name: game.name,
       genres: game.genre_slugs ?? [], rating: game.rating ?? 0,
       status: newStatus,
       is_liked: current?.isLiked ?? false,
       is_favorite: current?.isFavorite ?? false,
+      image_url: game.background_image,
     });
-    if (newStatus === "playing")  addToast(`🎮 Now playing: ${truncate(game.name, 18)}`, "playing");
+    if (newStatus === "playing") addToast(`🎮 Now playing: ${truncate(game.name, 18)}`, "playing");
     if (newStatus === "wishlist") addToast("Added to Wishlist!", "wishlist");
-    if (newStatus === "played")   addToast("Nice! Marked as Played.", "played");
+    if (newStatus === "played") addToast("Nice! Marked as Played.", "played");
     if (!newStatus) addToast("Removed from library", "info");
   }, [game, library, dispatch, addToast]);
 
@@ -376,8 +385,8 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
       <motion.div
         className="gdm-panel"
         initial={{ opacity: 0, y: 32, scale: 0.96 }}
-        animate={{ opacity: 1, y: 0,  scale: 1    }}
-        exit={{    opacity: 0, y: 24, scale: 0.97  }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 24, scale: 0.97 }}
         transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
         onClick={e => e.stopPropagation()}
       >
@@ -401,7 +410,7 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
                     <Calendar size={12} /> {new Date(game.released).getFullYear()}
                   </span>
                 )}
-                {game.genres?.slice(0, 3).map(g => (
+                {game.tags?.slice(0, 6).map(g => (
                   <span key={g} className="gdm-genre-tag">{g}</span>
                 ))}
                 {game.esrb_rating && game.esrb_rating !== "Not Rated" && (
@@ -523,9 +532,9 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
             {/* Library Actions */}
             <div className="gdm-actions">
               {[
-                { key: "playing", Icon: Gamepad,  label: "Playing",  activeLabel: "Playing ✓" },
+                { key: "playing", Icon: Gamepad, label: "Playing", activeLabel: "Playing ✓" },
                 { key: "wishlist", Icon: Bookmark, label: "Wishlist", activeLabel: "Wishlisted" },
-                { key: "played",   Icon: Play,     label: "Played",   activeLabel: "Played ✓"  },
+                { key: "played", Icon: Play, label: "Played", activeLabel: "Played ✓" },
               ].map(({ key, Icon, label, activeLabel }) => (
                 <button
                   key={key}
@@ -548,11 +557,12 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
                   const c = library?.get(game.id);
                   dispatch({ type: "TOGGLE_LIKE", gameId: game.id, game });
                   const nowLiked = !(c?.isLiked ?? false);
-                  persistLibraryItem(MOCK_USER_ID, {
+                  persistLibraryItemFS(user.uid, {
                     game_id: game.id, game_name: game.name,
                     genres: game.genre_slugs ?? [], rating: game.rating ?? 0,
                     status: c?.status ?? null, is_liked: nowLiked,
                     is_favorite: c?.isFavorite ?? false,
+                    image_url: game.background_image,
                   });
                   addToast(nowLiked ? "DNA Pattern Updated! 🧬" : "Unliked", nowLiked ? "liked" : "info");
                 }}
@@ -568,12 +578,13 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
                   const c = library?.get(game.id);
                   dispatch({ type: "TOGGLE_FAVORITE", gameId: game.id, game });
                   const nowFav = !(c?.isFavorite ?? false);
-                  persistLibraryItem(MOCK_USER_ID, {
+                  persistLibraryItemFS(user.uid, {
                     game_id: game.id, game_name: game.name,
                     genres: game.genre_slugs ?? [], rating: game.rating ?? 0,
                     status: c?.status ?? null,
                     is_liked: nowFav ? true : (c?.isLiked ?? false),
                     is_favorite: nowFav,
+                    image_url: game.background_image,
                   });
                   addToast(nowFav ? "Glitch noted your favorite! ⭐" : "Removed from favorites", nowFav ? "liked" : "info");
                 }}
@@ -650,16 +661,16 @@ function ToastContainer({ toasts }) {
         {toasts.map(t => (
           <motion.div key={t.id} className={`toast toast--${t.type}`}
             initial={{ opacity: 0, y: 20, scale: 0.92 }}
-            animate={{ opacity: 1, y: 0,  scale: 1    }}
-            exit={{    opacity: 0, y: -8, scale: 0.96  }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -8, scale: 0.96 }}
             transition={{ type: "spring", stiffness: 380, damping: 30 }}>
-            {t.type === "success"  && <CheckCircle2  size={15} />}
+            {t.type === "success" && <CheckCircle2 size={15} />}
             {t.type === "wishlist" && <BookmarkCheck size={15} />}
-            {t.type === "liked"    && <Heart         size={15} />}
-            {t.type === "info"     && <Sparkles      size={15} />}
-            {t.type === "played"   && <Play          size={15} />}
-            {t.type === "playing"  && <Gamepad       size={15} />}
-            {t.type === "xp"       && <Award         size={15} />}
+            {t.type === "liked" && <Heart size={15} />}
+            {t.type === "info" && <Sparkles size={15} />}
+            {t.type === "played" && <Play size={15} />}
+            {t.type === "playing" && <Gamepad size={15} />}
+            {t.type === "xp" && <Award size={15} />}
             <span>{t.message}</span>
           </motion.div>
         ))}
@@ -691,11 +702,11 @@ function groupGamesByYear(games) {
   return Object.keys(byYear)
     .sort((a, b) => (a === "Unknown" ? 1 : b === "Unknown" ? -1 : b - a))
     .map(year => {
-      const list    = byYear[year];
-      const byRat   = [...list].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+      const list = byYear[year];
+      const byRat = [...list].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
       const topHits = byRat.slice(0, 4);
-      const topIds  = new Set(topHits.map(g => String(g.id)));
-      const rest    = list
+      const topIds = new Set(topHits.map(g => String(g.id)));
+      const rest = list
         .filter(g => !topIds.has(String(g.id)))
         .sort((a, b) => new Date(b.released || 0) - new Date(a.released || 0));
       return { year, topHits, rest };
@@ -717,7 +728,7 @@ function AccordionSection({ label, defaultOpen = true, children, badge, classNam
         {badge && <span className="sb-accordion-badge">{badge}</span>}
         <motion.span className="sb-accordion-chevron"
           animate={{ rotate: open ? 180 : 0 }}
-          transition={{ duration: 0.22, ease: [0.16,1,0.3,1] }}>
+          transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}>
           <ChevronDown size={12} />
         </motion.span>
       </button>
@@ -726,8 +737,8 @@ function AccordionSection({ label, defaultOpen = true, children, badge, classNam
           <motion.div className="sb-accordion-body"
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
-            exit={{    height: 0, opacity: 0 }}
-            transition={{ duration: 0.26, ease: [0.16,1,0.3,1] }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.26, ease: [0.16, 1, 0.3, 1] }}
             style={{ overflow: "hidden" }}>
             <div className="sb-accordion-content">{children}</div>
           </motion.div>
@@ -773,9 +784,9 @@ function FilterTag({ label, subTags = [], colorClass = "", onRemoveAll, onRemove
         {expanded && subTags.length > 0 && (
           <motion.div className="filter-subtags"
             initial={{ opacity: 0, y: -4, scale: 0.97 }}
-            animate={{ opacity: 1, y: 0,  scale: 1    }}
-            exit={{    opacity: 0, y: -4, scale: 0.97  }}
-            transition={{ duration: 0.18, ease: [0.16,1,0.3,1] }}>
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -4, scale: 0.97 }}
+            transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}>
             {subTags.map(st => (
               <span key={st.id} className="filter-subtag">
                 <span className="filter-subtag__label">{st.label}</span>
@@ -939,48 +950,400 @@ function FilterDrawer({ portalTarget, activeFilters, onApplySelections, onClose 
 
 /* ── Entry Page ──────────────────────────────────────────────────────────────── */
 function EntryPage({ onEnter }) {
+  const [phase, setPhase] = useState("landing"); // landing, login, register
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [regStep, setRegStep] = useState(1);
+  const [otpCode, setOtpCode] = useState("");
+  const [resendTimer, setResendTimer] = useState(0);
+  const otpRefs = useRef([]);
+
+  const [linkRequired, setLinkRequired] = useState(false);
+  const [googleCred, setGoogleCred] = useState(null);
+
+  const { isVerified, requestOTP, confirmOTP, setIsVerified } = useOTP();
+
   const tags = ["DISCOVER.", "EXPLORE.", "CONQUER."];
   const [ti, setTi] = useState(0);
+
   useEffect(() => {
     const t = setInterval(() => setTi(i => (i + 1) % tags.length), 2200);
     return () => clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    let interval;
+    if (resendTimer > 0) {
+      interval = setInterval(() => setResendTimer(prev => prev - 1), 1000);
+    }
+    return () => clearInterval(interval);
+  }, [resendTimer]);
+
+  const switchToPhase = (newPhase) => {
+    setPhase(newPhase);
+    setError("");
+    if (newPhase === "register") {
+      setRegStep(1);
+      setOtpCode("");
+      setIsVerified(false);
+      setPassword("");
+      setConfirmPassword("");
+    }
+    setLinkRequired(false);
+    setGoogleCred(null);
+  };
+
+  const handleRequestOTP = async () => {
+    if (!email) { setError("Email is required."); return; }
+    setLoading(true); setError("");
+    try {
+      await requestOTP(email);
+      setRegStep(2);
+      setResendTimer(60);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOtpChange = (e, index) => {
+    const val = e.target.value;
+    if (!/^\d*$/.test(val)) return;
+
+    const currentOtp = otpCode.padEnd(6, " ").split("");
+    currentOtp[index] = val.slice(-1);
+    const finalOtp = currentOtp.join("").trim();
+    setOtpCode(finalOtp);
+
+    if (val && index < 5) {
+      otpRefs.current[index + 1]?.focus();
+    }
+  };
+
+  const handleOtpKeyDown = (e, index) => {
+    if (e.key === "Backspace" && !otpCode[index] && index > 0) {
+      otpRefs.current[index - 1]?.focus();
+    }
+  };
+
+  const handleVerifyOTP = async () => {
+    if (!otpCode) { setError("OTP is required."); return; }
+    setLoading(true); setError("");
+    try {
+      await confirmOTP(email, otpCode);
+      setRegStep(3);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+
+    if (phase === "register") {
+      if (regStep < 3) {
+        setLoading(false);
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError("Passwords do not match.");
+        setLoading(false);
+        return;
+      }
+    }
+
+    try {
+      if (phase === "login" && linkRequired) {
+        await onEnter("link", email, password, googleCred);
+      } else {
+        await onEnter(phase, email, password);
+      }
+    } catch (err) {
+      if (err.code === 'auth/user-not-found') {
+        setError("This account does not exist. Please register first.");
+      } else if (err.code === 'auth/wrong-password') {
+        setError("Incorrect password. Please try again.");
+      } else if (err.code === 'auth/invalid-credential') {
+        setError("Invalid login credentials. Please check your email and password.");
+      } else {
+        setError(err.message.replace("Firebase: ", ""));
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleAuth = async () => {
+    setError("");
+    try {
+      const result = await onEnter("google");
+      if (result?.linkRequired) {
+        setLinkRequired(true);
+        setGoogleCred(result.googleCred);
+      }
+    } catch (err) {
+      const msg = err.message.replace("Firebase: ", "");
+      setError(msg);
+      if (msg.includes("Register first")) {
+        switchToPhase("register");
+        if (err.email) setEmail(err.email);
+      }
+    }
+  };
+
+  const fadeUp = {
+    hidden: { opacity: 0, y: 20 },
+    visible: { opacity: 1, y: 0, transition: { duration: 0.5, ease: [0.16, 1, 0.3, 1] } },
+    exit: { opacity: 0, y: -20, transition: { duration: 0.3 } }
+  };
+
   return (
     <div className="entry-page">
       <div className="entry-grid-bg" /><div className="entry-scanline" />
-      <motion.div className="entry-content"
-        initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.8, ease: [0.16, 1, 0.3, 1] }}>
-        <div className="entry-logo-mark"><Gamepad2 size={28} /></div>
-        <h1 className="entry-headline">
-          GAME<br /><span className="entry-headline-accent">DISCOVERY</span><br />ENGINE
-        </h1>
-        <div className="entry-tagline-wrap">
-          <AnimatePresence mode="wait">
-            <motion.span key={ti} className="entry-tagline"
-              initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.4 }}>
-              {tags[ti]}
-            </motion.span>
-          </AnimatePresence>
-        </div>
-        <p className="entry-sub">AI-Personalised · <strong>Gamer DNA</strong> · Meet <strong>Glitch</strong></p>
-        <div className="entry-actions">
-          {[
-            { label: "Login",             Icon: LogIn,    v: "primary",   a: "login"    },
-            { label: "Register",          Icon: UserPlus, v: "secondary", a: "register" },
-            { label: "Continue as Guest", Icon: User,     v: "ghost",     a: "guest"    },
-          ].map(({ label, Icon, v, a }, i) => (
-            <motion.button key={a} className={`entry-btn entry-btn--${v}`} onClick={() => onEnter(a)}
-              initial={{ opacity: 0, x: -24 }} animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.5 + i * 0.12, duration: 0.5, ease: [0.16,1,0.3,1] }}
-              whileHover={{ scale: 1.03, x: 6 }} whileTap={{ scale: 0.97 }}>
-              <Icon size={18} /><span>{label}</span><ChevronRight size={16} className="btn-arrow" />
-            </motion.button>
-          ))}
-        </div>
-        <p className="entry-footer-note">Powered by <span className="accent-text">IGDB API</span> · SVM AI · Glitch ™</p>
-      </motion.div>
+
+      <AnimatePresence mode="wait">
+        {phase === "landing" ? (
+          <motion.div key="landing" className="entry-content"
+            variants={fadeUp} initial="hidden" animate="visible" exit="exit">
+            <div className="entry-logo-mark"><Gamepad2 size={28} /></div>
+            <h1 className="entry-headline">
+              GAME<br /><span className="entry-headline-accent">DISCOVERY</span><br />ENGINE
+            </h1>
+            <div className="entry-tagline-wrap">
+              <AnimatePresence mode="wait">
+                <motion.span key={ti} className="entry-tagline"
+                  initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.4 }}>
+                  {tags[ti]}
+                </motion.span>
+              </AnimatePresence>
+            </div>
+            <p className="entry-sub">AI-Personalised · <strong>Gamer DNA</strong> · Meet <strong>Glitch</strong></p>
+
+            <div className="entry-actions">
+              <motion.button className="entry-btn entry-btn--primary" onClick={() => switchToPhase("login")}
+                whileHover={{ scale: 1.03, x: 6 }} whileTap={{ scale: 0.97 }}>
+                <LogIn size={18} /><span>Sign In</span><ChevronRight size={16} className="btn-arrow" />
+              </motion.button>
+
+              <motion.button className="entry-btn entry-btn--secondary" onClick={() => switchToPhase("register")}
+                whileHover={{ scale: 1.03, x: 6 }} whileTap={{ scale: 0.97 }}>
+                <UserPlus size={18} /><span>Register</span><ChevronRight size={16} className="btn-arrow" />
+              </motion.button>
+
+              <motion.button className="entry-btn entry-btn--ghost" onClick={() => onEnter("guest")}
+                whileHover={{ scale: 1.03, x: 6 }} whileTap={{ scale: 0.97 }}>
+                <User size={18} /><span>Continue as Guest</span><ChevronRight size={16} className="btn-arrow" />
+              </motion.button>
+            </div>
+          </motion.div>
+        ) : (
+          <motion.div key="auth" className="entry-content auth-form-wrap"
+            variants={fadeUp} initial="hidden" animate="visible" exit="exit">
+            <button className="auth-back-btn" onClick={() => switchToPhase("landing")}>
+              <ChevronLeft size={16} /> Landing
+            </button>
+
+            <h2 className="auth-headline">{phase === "login" ? "SIGN IN" : "CREATE ACCOUNT"}</h2>
+            <p className="auth-sub">Access your personal Gamer DNA and library.</p>
+
+            <form className="auth-form" onSubmit={handleSubmit}>
+              {phase === "login" ? (
+                <>
+                  {linkRequired && (
+                    <div className="auth-error" style={{ borderColor: 'var(--accent)', background: 'rgba(0,212,255,0.1)', color: 'var(--accent)' }}>
+                      <AlertTriangle size={14} /> An account already exists with this email. Please enter your password to link your Google account.
+                    </div>
+                  )}
+                  <div className="auth-field">
+                    <label>EMAIL ADDRESS</label>
+                    <input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="name@domain.com" />
+                  </div>
+                  <div className="auth-field">
+                    <label>PASSWORD</label>
+                    <div className="auth-input-wrap">
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        value={password}
+                        onChange={e => setPassword(e.target.value)}
+                        required
+                        placeholder="••••••••"
+                      />
+                      <button
+                        type="button"
+                        className="auth-password-toggle"
+                        onClick={() => setShowPassword(!showPassword)}
+                        tabIndex="-1"
+                      >
+                        {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {error && <div className="auth-error"><AlertTriangle size={14} /> {error}</div>}
+
+                  <button type="submit" className="auth-submit-btn" disabled={loading}>
+                    {loading ? <Loader2 size={18} className="spin" /> : (linkRequired ? "Link & Login" : "Login")}
+                  </button>
+
+                  <div className="auth-divider">
+                    <span>OR</span>
+                  </div>
+
+                  <button type="button" className="google-auth-btn" onClick={handleGoogleAuth}>
+                    <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="G" />
+                    <span>Sign in with Google</span>
+                  </button>
+
+                  <div className="auth-toggle-link" onClick={() => switchToPhase("register")}>
+                    Don't have an account? <span>Register</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="auth-field">
+                    <label>EMAIL ADDRESS</label>
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={e => setEmail(e.target.value)}
+                      required
+                      placeholder="name@domain.com"
+                      disabled={regStep > 1}
+                    />
+                  </div>
+
+                  {regStep === 1 && (
+                    <>
+                      {error && <div className="auth-error"><AlertTriangle size={14} /> {error}</div>}
+                      <button type="button" className="auth-submit-btn" onClick={handleRequestOTP} disabled={loading} style={{ marginBottom: "10px" }}>
+                        {loading ? <Loader2 size={18} className="spin" /> : "Send OTP"}
+                      </button>
+                    </>
+                  )}
+
+                  {regStep === 2 && (
+                    <>
+                      <div className="auth-field">
+                        <label>6-DIGIT VERIFICATION CODE</label>
+                        <div className="otp-input-group">
+                          {[...Array(6)].map((_, i) => (
+                            <input
+                              key={i}
+                              ref={el => otpRefs.current[i] = el}
+                              type="text"
+                              className="otp-box"
+                              maxLength={1}
+                              value={otpCode[i] || ""}
+                              onChange={e => handleOtpChange(e, i)}
+                              onKeyDown={e => handleOtpKeyDown(e, i)}
+                              autoFocus={i === 0}
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="otp-resend-row">
+                        <button
+                          type="button"
+                          className="otp-resend-btn"
+                          disabled={resendTimer > 0 || loading}
+                          onClick={handleRequestOTP}
+                        >
+                          {resendTimer > 0 ? `Resend Code in ${resendTimer}s` : "Resend Verification Code"}
+                        </button>
+                      </div>
+
+                      {error && <div className="auth-error"><AlertTriangle size={14} /> {error}</div>}
+
+                      <button
+                        type="button"
+                        className="auth-submit-btn"
+                        onClick={handleVerifyOTP}
+                        disabled={loading || otpCode.length < 6}
+                      >
+                        {loading ? <Loader2 size={18} className="spin" /> : "Verify Identity"}
+                      </button>
+                    </>
+                  )}
+
+                  {regStep === 3 && (
+                    <>
+                      <div className="auth-field">
+                        <label>PASSWORD</label>
+                        <div className="auth-input-wrap">
+                          <input
+                            type={showPassword ? "text" : "password"}
+                            value={password}
+                            onChange={e => setPassword(e.target.value)}
+                            required
+                            placeholder="••••••••"
+                          />
+                          <button
+                            type="button"
+                            className="auth-password-toggle"
+                            onClick={() => setShowPassword(!showPassword)}
+                            tabIndex="-1"
+                          >
+                            {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
+                        {password.length > 0 && (
+                          <div className="password-strength-bar" style={{
+                            height: '3px', marginTop: '6px', borderRadius: '2px', transition: 'all 0.3s',
+                            background: password.length >= 8 ? 'var(--accent-green)' : password.length >= 5 ? 'var(--accent-amber)' : 'var(--accent-red)',
+                            width: `${Math.min(100, (password.length / 8) * 100)}%`
+                          }} />
+                        )}
+                      </div>
+                      <div className="auth-field">
+                        <label>CONFIRM PASSWORD</label>
+                        <div className="auth-input-wrap">
+                          <input
+                            type={showPassword ? "text" : "password"}
+                            value={confirmPassword}
+                            onChange={e => setConfirmPassword(e.target.value)}
+                            required
+                            placeholder="••••••••"
+                          />
+                          <button
+                            type="button"
+                            className="auth-password-toggle"
+                            onClick={() => setShowPassword(!showPassword)}
+                            tabIndex="-1"
+                          >
+                            {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
+                      </div>
+
+                      {error && <div className="auth-error"><AlertTriangle size={14} /> {error}</div>}
+
+                      <button type="submit" className="auth-submit-btn" disabled={loading}>
+                        {loading ? <Loader2 size={18} className="spin" /> : "Register"}
+                      </button>
+                    </>
+                  )}
+
+                  <div className="auth-toggle-link" onClick={() => switchToPhase("login")}>
+                    Already have an account? <span>Sign In</span>
+                  </div>
+                </>
+              )}
+            </form>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="entry-deco">
         {[...Array(3)].map((_, i) => (
           <motion.div key={i} className={`deco-card deco-card--${i}`}
@@ -1016,24 +1379,24 @@ function QuickMenu({ game, entry, onAction, onClose, anchorRect }) {
   const style = anchorRect ? {
     position: "fixed",
     top: anchorRect.bottom + 8,
-    left: Math.min(anchorRect.left, window.innerWidth - 180), 
+    left: Math.min(anchorRect.left, window.innerWidth - 180),
     zIndex: 10000,
-    width: "160px", 
+    width: "160px",
   } : { position: "fixed", top: "50%", left: "50%", zIndex: 10000, width: "160px" };
 
   const status = entry?.status;
 
   const menuContent = (
-    <motion.div ref={ref} className="quick-menu" style={style}
+    <motion.div ref={ref} className="quick-menu"
       style={{ ...style, overflow: 'hidden' }}
       initial={{ opacity: 0, scale: 0.88, y: 6 }}
-      animate={{ opacity: 1, scale: 1,    y: 0  }}
-      exit={{    opacity: 0, scale: 0.88, y: 6  }}
+      animate={{ opacity: 1, scale: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.88, y: 6 }}
       transition={{ type: "spring", stiffness: 420, damping: 28 }}>
       {[
-        { action: "playing",  Icon: Gamepad,  label: status === "playing"  ? "Stop Playing"        : "Mark as Playing", active: status === "playing"  },
+        { action: "playing", Icon: Gamepad, label: status === "playing" ? "Stop Playing" : "Mark as Playing", active: status === "playing" },
         { action: "wishlist", Icon: Bookmark, label: status === "wishlist" ? "Remove from Wishlist" : "Add to Wishlist", active: status === "wishlist" },
-        { action: "played",   Icon: Play,     label: status === "played"   ? "Unmark Played"        : "Mark as Played",  active: status === "played"   },
+        { action: "played", Icon: Play, label: status === "played" ? "Unmark Played" : "Mark as Played", active: status === "played" },
       ].map(({ action, Icon, label, active }) => (
         <button key={action}
           className={`quick-menu-item ${active ? "quick-menu-item--active" : ""}`}
@@ -1051,41 +1414,42 @@ function QuickMenu({ game, entry, onAction, onClose, anchorRect }) {
 /* ── Game Card ───────────────────────────────────────────────────────────────── */
 function GameCard({
   game, onOpenOverlay, entry, onLibraryAction, onLike, onFavorite,
-  isTopHit = false, bootAnim = false, suppressRating = false,
+  isTopHit = false, bootAnim = false, suppressRating = false, dnaWeights,
+  isDiscovery = false,
 }) {
-  const [menuOpen,   setMenuOpen]   = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [anchorRect, setAnchorRect] = useState(null);
-  const [hoverIdx,   setHoverIdx]   = useState(0);
-  const [hoverImgs,  setHoverImgs]  = useState([]);
+  const [hoverIdx, setHoverIdx] = useState(0);
+  const [hoverImgs, setHoverImgs] = useState([]);
   const [isHovering, setIsHovering] = useState(false);
   const fetchedRef = useRef(false);
 
-  const status       = entry?.status;
+  const status = entry?.status;
   const isWishlisted = status === "wishlist";
-  const isPlayed     = status === "played";
-  const isPlaying    = status === "playing";
-  const isLiked      = entry?.isLiked    ?? false;
-  const isFavorite   = entry?.isFavorite ?? false;
-  const showNew      = isNewRelease(game.released);
+  const isPlayed = status === "played";
+  const isPlaying = status === "playing";
+  const isLiked = entry?.isLiked ?? false;
+  const isFavorite = entry?.isFavorite ?? false;
+  const showNew = isNewRelease(game.released);
 
   const handleMouseEnter = useCallback(async () => {
     setIsHovering(true);
     if (fetchedRef.current) return;
     fetchedRef.current = true;
     try {
-      const res  = await fetch(`${API_BASE}/games/${game.id}/screenshots`);
+      const res = await fetch(`${API_BASE}/games/${game.id}/screenshots`);
       if (!res.ok) return;
       const data = await res.json();
       const imgs = (data.results ?? []).slice(0, 5).map(s => s.image).filter(Boolean);
       if (imgs.length > 0) setHoverImgs(imgs);
-    } catch {}
+    } catch { }
   }, [game.id]);
 
-  const handleMouseLeave  = useCallback(() => { setIsHovering(false); setHoverIdx(0); }, []);
-  const handleMouseMove   = e => {
+  const handleMouseLeave = useCallback(() => { setIsHovering(false); setHoverIdx(0); }, []);
+  const handleMouseMove = e => {
     if (!hoverImgs.length) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const x    = e.clientX - rect.left;
+    const x = e.clientX - rect.left;
     setHoverIdx(Math.max(0, Math.min(Math.floor(x / (rect.width / (hoverImgs.length + 1))), hoverImgs.length)));
   };
 
@@ -1093,6 +1457,8 @@ function GameCard({
     ? hoverImgs[hoverIdx - 1] : game.background_image;
   const topTags = game.tags?.slice(0, 5) ?? [];
   const hasMeta = game.developer || game.released || topTags.length > 0;
+
+  const matchPct = useMemo(() => calculateMatchPercentage(game, dnaWeights), [game, dnaWeights]);
 
   const handlePlusClick = e => {
     e.stopPropagation();
@@ -1115,6 +1481,16 @@ function GameCard({
 
       {game.svm_score != null && <div className="card-svm-dot" title={`SVM ${(game.svm_score * 100).toFixed(0)}%`} />}
       {isTopHit && !suppressRating && <div className="card-top-hit-badge"><Star size={9} fill="currentColor" /> Top Hit</div>}
+      {matchPct && matchPct >= 20 && !suppressRating && (
+        <div className="card-top-hit-badge" style={{ left: isTopHit ? '70px' : '7px', background: 'rgba(0,0,0,0.6)', color: 'var(--accent)', borderColor: 'var(--border-muted)', backdropFilter: 'blur(4px)' }}>
+          <Sparkles size={9} /> {matchPct}% Match
+        </div>
+      )}
+      {isDiscovery && game.hypes > 50 && (
+        <div className="card-top-hit-badge card-trending-badge" style={{ left: (isTopHit || (matchPct && matchPct >= 20)) ? 'auto' : '7px', right: (isTopHit || (matchPct && matchPct >= 20)) ? '7px' : 'auto', background: 'rgba(255,100,0,0.15)', color: '#ff8800', borderColor: 'rgba(255,136,0,0.3)', backdropFilter: 'blur(8px)' }}>
+          <Zap size={9} fill="currentColor" /> Trending
+        </div>
+      )}
 
       <div className="card-image-wrap">
         {isHovering && hoverImgs.length > 0 && (
@@ -1134,7 +1510,7 @@ function GameCard({
         {!displayImg && <div className="card-image card-image--fallback"><Gamepad2 size={40} opacity={0.3} /></div>}
         <div className="card-image-overlay" />
         {showNew && <div className="card-new-badge">NEW</div>}
-        {isPlaying    && <div className="card-status-badge card-status-badge--playing"><Gamepad size={9} /> Playing</div>}
+        {isPlaying && <div className="card-status-badge card-status-badge--playing"><Gamepad size={9} /> Playing</div>}
         {isWishlisted && !isPlaying && <div className="card-status-badge"><Bookmark size={9} /> Wishlist</div>}
         {isPlayed && !isPlaying && !isWishlisted && <div className="card-status-badge card-status-badge--played"><Play size={9} /> Played</div>}
 
@@ -1156,8 +1532,8 @@ function GameCard({
               whileHover={{ scale: 1.18 }} whileTap={{ scale: 0.88 }}>
               <AnimatePresence mode="wait" initial={false}>
                 {(isWishlisted || isPlayed || isPlaying)
-                  ? <motion.span key="c" initial={{ rotate:-45,opacity:0 }} animate={{ rotate:0,opacity:1 }} exit={{ rotate:45,opacity:0 }} transition={{ duration:0.16 }}><Check size={13} strokeWidth={3} /></motion.span>
-                  : <motion.span key="p" initial={{ rotate:45,opacity:0 }} animate={{ rotate:0,opacity:1 }} exit={{ rotate:-45,opacity:0 }} transition={{ duration:0.16 }}><Plus size={13} strokeWidth={2.5} /></motion.span>
+                  ? <motion.span key="c" initial={{ rotate: -45, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: 45, opacity: 0 }} transition={{ duration: 0.16 }}><Check size={13} strokeWidth={3} /></motion.span>
+                  : <motion.span key="p" initial={{ rotate: 45, opacity: 0 }} animate={{ rotate: 0, opacity: 1 }} exit={{ rotate: -45, opacity: 0 }} transition={{ duration: 0.16 }}><Plus size={13} strokeWidth={2.5} /></motion.span>
                 }
               </AnimatePresence>
             </motion.button>
@@ -1179,7 +1555,7 @@ function GameCard({
       <div className="card-body">
         <h3 className="card-title">{truncate(game.name, 42)}</h3>
         <div className="card-meta">
-          {game.genres?.slice(0, 2).map(g => <span key={g} className="card-genre-tag">{g}</span>)}
+          {game.tags?.slice(0, 4).map(g => <span key={g} className="card-genre-tag">{g}</span>)}
         </div>
         <div className="card-footer">
           {!suppressRating && (
@@ -1197,7 +1573,7 @@ function GameCard({
             initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.18 }}>
             {game.developer && <p className="cme-row"><span className="cme-key">Dev</span><span className="cme-val">{truncate(game.developer, 22)}</span></p>}
-            {game.released  && <p className="cme-row"><span className="cme-key">Released</span><span className="cme-val">{game.released}</span></p>}
+            {game.released && <p className="cme-row"><span className="cme-key">Released</span><span className="cme-val">{game.released}</span></p>}
             {topTags.length > 0 && <div className="cme-tags">{topTags.map(t => <span key={t} className="cme-tag">{t}</span>)}</div>}
           </motion.div>
         )}
@@ -1212,7 +1588,7 @@ function GameCard({
 
 /* ── Year-Grouped Grid ───────────────────────────────────────────────────────── */
 function YearGroupedGrid({ games, library, onOpenOverlay, sharedCard, showGrouped, isFirstLoad, yearRefs }) {
-  const safeLib   = library instanceof Map ? library : new Map();
+  const safeLib = library instanceof Map ? library : new Map();
   const safeGames = Array.isArray(games) ? games : [];
   if (!showGrouped) {
     return (
@@ -1277,12 +1653,12 @@ function YearGroupedGrid({ games, library, onOpenOverlay, sharedCard, showGroupe
      endpoint  — API path, e.g. "/api/games?awaited=true" (default hypes)
    ════════════════════════════════════════════════════════════════════════════ */
 function TrendingRow({
-  title    = "Trending Now",
+  title = "Trending Now",
   subtitle = "Most Anticipated",
   endpoint = "/api/games?page_size=16&ordering=-hypes",
-  onOpenOverlay, library, onLibraryAction, onLike, onFavorite,
+  onOpenOverlay, library, onLibraryAction, onLike, onFavorite, dnaWeights,
 }) {
-  const [games,   setGames]   = useState([]);
+  const [games, setGames] = useState([]);
   const [loading, setLoading] = useState(true);
   const listRef = useRef(null);
 
@@ -1291,9 +1667,9 @@ function TrendingRow({
     setLoading(true);
     setGames([]);
     // Normalise endpoint — strip leading /api if API_BASE already ends with /api
-    const url = endpoint.startsWith("http")
+    const url = (endpoint && endpoint.startsWith("http"))
       ? endpoint
-      : `${API_BASE}${endpoint.replace(/^\/api/, "")}`;
+      : `${API_BASE}${(endpoint || "").replace(/^\/api/, "")}`;
     fetch(url)
       .then(r => r.ok ? r.json() : { results: [] })
       .then(d => { if (!cancelled) { setGames(Array.isArray(d.results) ? d.results : []); setLoading(false); } })
@@ -1318,10 +1694,11 @@ function TrendingRow({
       <div className="trending-list" ref={listRef}>
         {games.map(game => (
           <div key={game.id} className="trending-card-wrapper">
-            <GameCard game={game} onOpenOverlay={onOpenOverlay}
+            <GameCard key={game.id} game={game} onOpenOverlay={onOpenOverlay}
               entry={library?.get(game.id)}
               onLibraryAction={onLibraryAction}
-              onLike={onLike} onFavorite={onFavorite} />
+              onLike={onLike} onFavorite={onFavorite}
+              dnaWeights={dnaWeights} />
           </div>
         ))}
       </div>
@@ -1339,7 +1716,7 @@ function PersistentHeader({
   svmMode, isDiscoveryActive, isFirstLoad, searchRef,
 }) {
   const isLibrary = view === "library";
-  const isMax     = level >= 20;
+  const isMax = level >= 20;
   return (
     <motion.header className="dash-header"
       variants={isFirstLoad ? bootMain : undefined}
@@ -1404,7 +1781,7 @@ function PersistentHeader({
    DASHBOARD
    ════════════════════════════════════════════════════════════════════════════ */
 function Dashboard({
-  userMode, isLoggedIn,
+  userMode, isLoggedIn, user,
   library, dispatch, addToast,
   onLogout, onNavigateLibrary,
   dnaWeights, onDnaWeightsChange,
@@ -1423,33 +1800,35 @@ function Dashboard({
     [library]
   );
 
-  const [portalTarget,  setPortalTarget]  = useState(null);
+  const [portalTarget, setPortalTarget] = useState(null);
   const [activeSection, setActiveSection] = useState("");
-  const [yearFilter,    setYearFilter]    = useState("all");
-  const scrollRef   = useRef(null);
+  const [appliedDnaWeights, setAppliedDnaWeights] = useState(dnaWeights);
+  const [recalibrateTick, setRecalibrateTick] = useState(0);
+  const [yearFilter, setYearFilter] = useState("all");
+  const scrollRef = useRef(null);
   const sentinelRef = useRef(null);
-  const yearRefs    = useRef({});
+  const yearRefs = useRef({});
 
   const [activeFilters, setActiveFilters] = useState(emptyFilters());
 
   const isDiscovery = activeSection === DISCOVERY_SLUG;
-  const isTimeline  = activeSection === TIMELINE_LATEST || activeSection === TIMELINE_UPCOMING;
+  const isTimeline = activeSection === TIMELINE_LATEST || activeSection === TIMELINE_UPCOMING;
   const isFreeGames = activeSection === FREE_GAMES_SLUG;
-  const isRetro     = activeSection === RETRO_CLASSICS_SLUG;
-  const isTop       = activeSection === TOP_2026_SLUG || activeSection === POPULAR_2025_SLUG || activeSection === ALL_TIME_SLUG;
-  const canGroup    = !isDiscovery && !isFreeGames && !searchQuery && !isTop;
+  const isRetro = activeSection === RETRO_CLASSICS_SLUG;
+  const isTop = activeSection === TOP_2026_SLUG || activeSection === POPULAR_2025_SLUG || activeSection === ALL_TIME_SLUG;
+  const canGroup = !isDiscovery && !isFreeGames && !searchQuery && !isTop;
   const showGrouped = canGroup && yearFilter === "all";
 
   const activeGenre = (isDiscovery || isTimeline || isFreeGames || isRetro || isTop) ? "" : activeSection;
-  const apiParams   = sectionToApiParams(activeSection);
-  const userId      = isLoggedIn ? MOCK_USER_ID : "";
-  const level       = getLevel(xp);
+  const apiParams = sectionToApiParams(activeSection);
+  const userId = user?.uid || "";
+  const level = getLevel(xp);
 
   const platformIds = useMemo(() => Array.from(activeFilters.platforms?.keys() ?? []), [activeFilters]);
-  const genreIds    = useMemo(() => Array.from(activeFilters.genres?.keys()    ?? []), [activeFilters]);
-  const companyIds  = useMemo(() => [], []);
-  const themeIds    = useMemo(() => Array.from(activeFilters.themes?.keys()    ?? []), [activeFilters]);
-  const yearParam   = useMemo(() => Array.from(activeFilters.years?.keys() ?? []).join(","), [activeFilters]);
+  const genreIds = useMemo(() => Array.from(activeFilters.genres?.keys() ?? []), [activeFilters]);
+  const companyIds = useMemo(() => [], []);
+  const themeIds = useMemo(() => Array.from(activeFilters.themes?.keys() ?? []), [activeFilters]);
+  const yearParam = useMemo(() => Array.from(activeFilters.years?.keys() ?? []).join(","), [activeFilters]);
 
   const totalFilterCount = useMemo(() =>
     Object.values(activeFilters).reduce((acc, m) => acc + (m?.size ?? 0), 0),
@@ -1463,8 +1842,10 @@ function Dashboard({
     searchQuery,
     genre: activeGenre,
     userId,
-    dnaWeights: isDiscovery ? dnaWeights : null,
+    dnaWeights: isDiscovery ? appliedDnaWeights : null,
+    dnaOffsets: isDiscovery ? dnaOffsets : null,
     discoveryMode: isDiscovery && isLoggedIn,
+    salt: recalibrateTick,
     ordering: apiParams.ordering,
     metacritic: apiParams.metacritic,
     dates: apiParams.dates ?? "",
@@ -1491,11 +1872,11 @@ function Dashboard({
     return [...y].sort((a, b) => b - a);
   }, [allGames]);
 
-  const entries       = useMemo(() => Array.from(safeLibrary.values()), [safeLibrary]);
+  const entries = useMemo(() => Array.from(safeLibrary.values()), [safeLibrary]);
   const wishlistCount = useMemo(() => entries.filter(e => e.status === "wishlist").length, [entries]);
-  const playedCount   = useMemo(() => entries.filter(e => e.status === "played").length, [entries]);
-  const playingCount  = useMemo(() => entries.filter(e => e.status === "playing").length, [entries]);
-  const likedCount    = useMemo(() => entries.filter(e => e.isLiked).length, [entries]);
+  const playedCount = useMemo(() => entries.filter(e => e.status === "played").length, [entries]);
+  const playingCount = useMemo(() => entries.filter(e => e.status === "playing").length, [entries]);
+  const likedCount = useMemo(() => entries.filter(e => e.isLiked).length, [entries]);
 
   /* Reset scroll on section / filter change */
   useEffect(() => {
@@ -1507,12 +1888,17 @@ function Dashboard({
     const s = sentinelRef.current, r = scrollRef.current;
     if (!s || !r) return;
     const obs = new IntersectionObserver(
-      ([e]) => { if (e.isIntersecting && hasMore && !loading && !loadingMore) loadMore(); },
+      ([e]) => {
+        if (e.isIntersecting && hasMore && !loading && !loadingMore) {
+          if (isDiscovery) setAppliedDnaWeights(dnaWeights);
+          loadMore();
+        }
+      },
       { root: r, rootMargin: "0px 0px 140px 0px", threshold: 0 }
     );
     obs.observe(s);
     return () => obs.disconnect();
-  }, [hasMore, loading, loadingMore, loadMore]);
+  }, [hasMore, loading, loadingMore, loadMore, isDiscovery, dnaWeights]);
 
   /* "/" shortcut */
   useEffect(() => {
@@ -1525,7 +1911,7 @@ function Dashboard({
     return () => window.removeEventListener("keydown", h);
   }, [searchRef]);
 
-  const clearSearch  = () => { setSearchInput(""); setSearchQuery(""); };
+  const clearSearch = () => { setSearchInput(""); setSearchQuery(""); };
   const clearFilters = useCallback(() => setActiveFilters(emptyFilters()), []);
 
   const handleBrowseFeed = useCallback(() => {
@@ -1562,16 +1948,16 @@ function Dashboard({
 
   /* Library handlers */
   const handleLibraryAction = useCallback((game, action) => {
-    const current   = safeLibrary.get(game.id);
+    const current = safeLibrary.get(game.id);
     const newStatus = current?.status === action ? null : action;
     dispatch({ type: "SET_STATUS", gameId: game.id, game, status: newStatus });
     const next = new Map(safeLibrary);
     next.set(game.id, { ...(current ?? { game, isLiked: false, isFavorite: false, playtime: 0 }), status: newStatus });
     syncDNA(next);
-    persistLibraryItem(MOCK_USER_ID, { game_id: game.id, game_name: game.name, genres: game.genre_slugs ?? [], rating: game.rating ?? 0, status: newStatus, is_liked: current?.isLiked ?? false, is_favorite: current?.isFavorite ?? false });
-    if (newStatus === "playing")  { addToast(`🎮 Now playing: ${truncate(game.name, 18)}`, "playing", `play:${game.id}`); onXpGain(XP_EVENTS.playing, game.id, "playing"); }
+    persistLibraryItemFS(user.uid, { game_id: game.id, game_name: game.name, genres: game.genre_slugs ?? [], rating: game.rating ?? 0, status: newStatus, is_liked: current?.isLiked ?? false, is_favorite: current?.isFavorite ?? false, image_url: game.background_image });
+    if (newStatus === "playing") { addToast(`🎮 Now playing: ${truncate(game.name, 18)}`, "playing", `play:${game.id}`); onXpGain(XP_EVENTS.playing, game.id, "playing"); }
     if (newStatus === "wishlist") { addToast("Added to Wishlist!", "wishlist", `wl:${game.id}`); onXpGain(XP_EVENTS.wishlist, game.id, "wishlist"); }
-    if (newStatus === "played")   { addToast("Nice! Marked as Played.", "played", `pl:${game.id}`); onXpGain(XP_EVENTS.played, game.id, "played"); }
+    if (newStatus === "played") { addToast("Nice! Marked as Played.", "played", `pl:${game.id}`); onXpGain(XP_EVENTS.played, game.id, "played"); }
     if (!newStatus) addToast("Removed from library", "info", `rm:${game.id}:${Date.now()}`);
   }, [safeLibrary, dispatch, addToast, onXpGain, syncDNA]);
 
@@ -1582,7 +1968,7 @@ function Dashboard({
     const n = new Map(safeLibrary);
     n.set(game.id, { ...(c ?? { game, status: null, isFavorite: false, playtime: 0 }), isLiked: nowLiked, isFavorite: nowLiked ? (c?.isFavorite ?? false) : false });
     syncDNA(n);
-    persistLibraryItem(MOCK_USER_ID, { game_id: game.id, game_name: game.name, genres: game.genre_slugs ?? [], rating: game.rating ?? 0, status: c?.status ?? null, is_liked: nowLiked, is_favorite: nowLiked ? (c?.isFavorite ?? false) : false });
+    persistLibraryItemFS(user.uid, { game_id: game.id, game_name: game.name, genres: game.genre_slugs ?? [], rating: game.rating ?? 0, status: c?.status ?? null, is_liked: nowLiked, is_favorite: nowLiked ? (c?.isFavorite ?? false) : false, image_url: game.background_image });
     if (nowLiked) { addToast("DNA Pattern Updated! 🧬", "liked", `like:${game.id}`); onXpGain(XP_EVENTS.like, game.id, "like"); }
     else addToast("Unliked", "info", `unlike:${game.id}`);
   }, [safeLibrary, dispatch, addToast, onXpGain, syncDNA]);
@@ -1594,7 +1980,7 @@ function Dashboard({
     const n = new Map(safeLibrary);
     n.set(game.id, { ...(c ?? { game, status: null, playtime: 0 }), isFavorite: nowFav, isLiked: nowFav ? true : (c?.isLiked ?? false) });
     syncDNA(n);
-    persistLibraryItem(MOCK_USER_ID, { game_id: game.id, game_name: game.name, genres: game.genre_slugs ?? [], rating: game.rating ?? 0, status: c?.status ?? null, is_liked: nowFav ? true : (c?.isLiked ?? false), is_favorite: nowFav });
+    persistLibraryItemFS(user.uid, { game_id: game.id, game_name: game.name, genres: game.genre_slugs ?? [], rating: game.rating ?? 0, status: c?.status ?? null, is_liked: nowFav ? true : (c?.isLiked ?? false), is_favorite: nowFav, image_url: game.background_image });
     if (nowFav) { addToast("Glitch noted your favorite! ⭐", "liked", `fav:${game.id}`); onXpGain(XP_EVENTS.favorite, game.id, "favorite"); }
     else addToast("Removed from favorites", "info", `unfav:${game.id}`);
   }, [safeLibrary, dispatch, addToast, onXpGain, syncDNA]);
@@ -1607,8 +1993,10 @@ function Dashboard({
       onLike: handleLike,
       onFavorite: handleFavorite,
       suppressRating: isUpcomingSection,
+      dnaWeights,
+      isDiscovery,
     }),
-    [handleLibraryAction, handleLike, handleFavorite, isUpcomingSection]
+    [handleLibraryAction, handleLike, handleFavorite, isUpcomingSection, dnaWeights, isDiscovery]
   );
 
   const handleSelectFilterItem = useCallback((item, filterKey, mode) => {
@@ -1652,16 +2040,25 @@ function Dashboard({
   }, []);
 
   const statusLabel = useMemo(() => {
-    if (loading && !games.length)                return "INITIALIZING…";
-    if (totalFilterCount > 0)                    return `Filtered · ${totalFilterCount} active`;
-    if (isDiscovery)                             return "Neural Discovery Active";
-    if (activeSection === TIMELINE_LATEST)       return "Current Era (2024–2026)";
-    if (activeSection === TIMELINE_UPCOMING)     return "Future Projects";
-    if (isRetro)                                 return "Retro Archive (1980–2005)";
-    if (isFreeGames)                             return "Free-to-Play";
-    if (activeSection === TOP_2026_SLUG)         return "Best of 2026";
-    if (activeSection === POPULAR_2025_SLUG)     return "Popular of 2025";
-    if (activeSection === ALL_TIME_SLUG)         return "All-time Classics";
+    if (loading && !games.length) return "INITIALIZING…";
+    if (totalFilterCount > 0) return `Filtered · ${totalFilterCount} active`;
+    if (isDiscovery) {
+      if (dnaWeights) {
+        const topGenre = Object.entries(dnaWeights).sort((a, b) => b[1] - a[1])[0];
+        if (topGenre && topGenre[1] > 20) {
+          const genreName = DNA_GENRES.find(g => g.slug === topGenre[0])?.label || topGenre[0];
+          return `Based on your love for ${genreName}`;
+        }
+      }
+      return "Neural Discovery Active";
+    }
+    if (activeSection === TIMELINE_LATEST) return "Current Era (2024–2026)";
+    if (activeSection === TIMELINE_UPCOMING) return "Future Projects";
+    if (isRetro) return "Retro Archive (1980–2005)";
+    if (isFreeGames) return "Free-to-Play";
+    if (activeSection === TOP_2026_SLUG) return "Best of 2026";
+    if (activeSection === POPULAR_2025_SLUG) return "Popular of 2025";
+    if (activeSection === ALL_TIME_SLUG) return "All-time Classics";
     if (activeGenre) return `Genre · ${GENRES.find(g => g.slug === activeGenre)?.label ?? activeGenre}`;
     return "Full Database";
   }, [loading, games.length, totalFilterCount, isDiscovery, activeSection, isRetro, isFreeGames, activeGenre]);
@@ -1732,9 +2129,9 @@ function Dashboard({
             <AccordionSection label="TIMELINE" defaultOpen={true}>
               <ul className="sidebar-list">
                 {[
-                  { s: TIMELINE_LATEST,     label: "Latest 2026",   Icon: Clock,         active: activeSection === TIMELINE_LATEST     },
-                  { s: TIMELINE_UPCOMING,   label: "Upcoming",       Icon: CalendarClock, active: activeSection === TIMELINE_UPCOMING   },
-                  { s: RETRO_CLASSICS_SLUG, label: "Retro Classics", Icon: History,       active: isRetro },
+                  { s: TIMELINE_LATEST, label: "Latest 2026", Icon: Clock, active: activeSection === TIMELINE_LATEST },
+                  { s: TIMELINE_UPCOMING, label: "Upcoming", Icon: CalendarClock, active: activeSection === TIMELINE_UPCOMING },
+                  { s: RETRO_CLASSICS_SLUG, label: "Retro Classics", Icon: History, active: isRetro },
                 ].map(({ s, label, Icon, active }) => (
                   <li key={s}>
                     <button className={`sidebar-item ${active ? "sidebar-item--active" : ""}`}
@@ -1752,9 +2149,9 @@ function Dashboard({
             <AccordionSection label="TOP" defaultOpen={true}>
               <ul className="sidebar-list">
                 {[
-                  { s: TOP_2026_SLUG,     label: "Best of 2026",      Icon: Trophy,     active: activeSection === TOP_2026_SLUG     },
-                  { s: POPULAR_2025_SLUG, label: "Popular of 2025",    Icon: TrendingUp, active: activeSection === POPULAR_2025_SLUG },
-                  { s: ALL_TIME_SLUG,     label: "All-time Top Games", Icon: Star,       active: activeSection === ALL_TIME_SLUG     },
+                  { s: TOP_2026_SLUG, label: "Best of 2026", Icon: Trophy, active: activeSection === TOP_2026_SLUG },
+                  { s: POPULAR_2025_SLUG, label: "Popular of 2025", Icon: TrendingUp, active: activeSection === POPULAR_2025_SLUG },
+                  { s: ALL_TIME_SLUG, label: "All-time Top Games", Icon: Star, active: activeSection === ALL_TIME_SLUG },
                 ].map(({ s, label, Icon, active }) => (
                   <li key={s}>
                     <button className={`sidebar-item ${active ? "sidebar-item--active" : ""}`}
@@ -1775,9 +2172,9 @@ function Dashboard({
               badge={totalFilterCount > 0 ? String(totalFilterCount) : undefined}>
               <div className="sb-browse-grid">
                 {BROWSE_ITEMS.map(({ id, label, Icon }) => {
-                  const fkey     = PORTAL_FILTER_MAP[id] ?? id;
+                  const fkey = PORTAL_FILTER_MAP[id] ?? id;
                   const selCount = activeFilters[fkey]?.size ?? 0;
-                  const isOpen   = portalTarget === id;
+                  const isOpen = portalTarget === id;
                   return (
                     <button key={id}
                       className={`sb-browse-btn ${isOpen ? "sb-browse-btn--active" : ""} ${selCount > 0 ? "sb-browse-btn--has-sel" : ""}`}
@@ -1831,9 +2228,9 @@ function Dashboard({
                 <div className={`svm-status-pill svm-status-pill--${fetchedSvmMode}`}>
                   <Zap size={11} />
                   <span>
-                    {fetchedSvmMode === "svm"        ? "DNA Active"
-                    : fetchedSvmMode === "cold_start" ? "Learning Mode"
-                    : "Awaiting login"}
+                    {fetchedSvmMode === "svm" ? "DNA Active"
+                      : fetchedSvmMode === "cold_start" ? "Learning Mode"
+                        : "Awaiting login"}
                   </span>
                 </div>
               </>
@@ -1880,7 +2277,8 @@ function Dashboard({
               library={safeLibrary}
               onLibraryAction={handleLibraryAction}
               onLike={handleLike}
-              onFavorite={handleFavorite} />
+              onFavorite={handleFavorite}
+              dnaWeights={dnaWeights} />
           )}
 
           {/* Status bar */}
@@ -1891,7 +2289,9 @@ function Dashboard({
               <motion.button
                 className="recalibrate-btn"
                 onClick={() => {
-                  refresh();
+                  const freshWeights = { ...dnaWeights };
+                  setAppliedDnaWeights(freshWeights);
+                  setRecalibrateTick(prev => prev + 1);
                   if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior: "instant" });
                 }}
                 whileHover={{ scale: 1.05 }}
@@ -1961,6 +2361,7 @@ function Dashboard({
                   onLibraryAction={handleLibraryAction}
                   onLike={handleLike}
                   onFavorite={handleFavorite}
+                  dnaWeights={dnaWeights}
                 />
               )}
               <YearGroupedGrid
@@ -2002,40 +2403,41 @@ function Dashboard({
    ROOT APP
    ════════════════════════════════════════════════════════════════════════════ */
 export default function App() {
-  const [view,          setView]          = useState("entry");
-  const [userMode,      setUserMode]      = useState("guest");
-  const [isLoggedIn,    setIsLoggedIn]    = useState(false);
-  const [dnaWeights,    setDnaWeights]    = useState(null);
-  const [dnaOffsets,    setDnaOffsets]    = useState({});
-  const [xp,            setXp]            = useState(0);
-  const [muted,         setMuted]         = useState(false);
-  const [corrupted,     setCorrupted]     = useState(false);
-  const [dashKey,       setDashKey]       = useState(0);
-  const [siteTint,      setSiteTint]      = useState(null);
-  const [levelJustUp,   setLevelJustUp]   = useState(false);
-  const [isFirstLoad,   setIsFirstLoad]   = useState(false);
+  const { user, loading: authLoading } = useFirebaseUser();
+  const [view, setView] = useState("entry");
+  const [userMode, setUserMode] = useState("guest");
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [dnaWeights, setDnaWeights] = useState(null);
+  const [dnaOffsets, setDnaOffsets] = useState({});
+  const [xp, setXp] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [corrupted, setCorrupted] = useState(false);
+  const [dashKey, setDashKey] = useState(0);
+  const [siteTint, setSiteTint] = useState(null);
+  const [levelJustUp, setLevelJustUp] = useState(false);
+  const [isFirstLoad, setIsFirstLoad] = useState(false);
 
   /* overlayGame holds the full game object (from card) for instant open */
-  const [overlayGame,   setOverlayGame]   = useState(null);
+  const [overlayGame, setOverlayGame] = useState(null);
 
-  const [searchInput,       setSearchInput]      = useState("");
-  const [searchQuery,       setSearchQuery]       = useState("");
-  const [svmMode,           setSvmMode]           = useState("raw");
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [svmMode, setSvmMode] = useState("raw");
   const [isDiscoveryActive, setIsDiscoveryActive] = useState(false);
   const searchRef = useRef(null);
 
   const firstLoadFired = useRef(false);
   const [library, dispatch] = useReducer(libraryReducer, new Map());
   const { toasts, addToast } = useToast();
-  const prevLevel  = useRef(1);
-  const xpGranted  = useRef(new Set());
+  const prevLevel = useRef(1);
+  const xpGranted = useRef(new Set());
 
-  const [playHum1]   = useSound(SFX.hum1,   { volume: 0.35, soundEnabled: !muted });
-  const [playHum2]   = useSound(SFX.hum2,   { volume: 0.35, soundEnabled: !muted });
-  const [playHum3]   = useSound(SFX.hum3,   { volume: 0.35, soundEnabled: !muted });
-  const [playChime]  = useSound(SFX.chime,  { volume: 0.55, soundEnabled: !muted });
-  const [playDizzy]  = useSound(SFX.dizzy,  { volume: 0.40, soundEnabled: !muted });
-  const [playSad]    = useSound(SFX.sad,    { volume: 0.40, soundEnabled: !muted });
+  const [playHum1] = useSound(SFX.hum1, { volume: 0.35, soundEnabled: !muted });
+  const [playHum2] = useSound(SFX.hum2, { volume: 0.35, soundEnabled: !muted });
+  const [playHum3] = useSound(SFX.hum3, { volume: 0.35, soundEnabled: !muted });
+  const [playChime] = useSound(SFX.chime, { volume: 0.55, soundEnabled: !muted });
+  const [playDizzy] = useSound(SFX.dizzy, { volume: 0.40, soundEnabled: !muted });
+  const [playSad] = useSound(SFX.sad, { volume: 0.40, soundEnabled: !muted });
   const [playGlitch] = useSound(SFX.glitch, { volume: 0.50, soundEnabled: !muted });
   const playHum = useCallback(() => [playHum1, playHum2, playHum3][Math.floor(Math.random() * 3)]?.(), [playHum1, playHum2, playHum3]);
 
@@ -2060,17 +2462,29 @@ export default function App() {
   }, [addToast, playChime]);
 
   useEffect(() => {
-    if (!isLoggedIn) return;
-    fetch(`${API_BASE}/library/${MOCK_USER_ID}`)
-      .then(r => r.ok ? r.json() : [])
-      .then(rows => { if (Array.isArray(rows) && rows.length) dispatch({ type: "HYDRATE", rows }); })
-      .catch(() => {});
-  }, [isLoggedIn]);
+    if (authLoading) return;
+    if (user) {
+      setIsLoggedIn(true);
+      setUserMode(user.isAnonymous ? "guest" : "user");
+      // Load library from Firestore
+      fetchLibraryFS(user.uid).then(rows => {
+        if (rows?.length) dispatch({ type: "HYDRATE", rows });
+      });
+      // If we're on entry page and just logged in, auto-enter
+      // Auto-redirect disabled for UI testing:
+      // if (view === "entry") setView("dashboard");
+    } else {
+      setIsLoggedIn(false);
+      setUserMode("guest");
+    }
+  }, [user, authLoading, view]);
 
   useEffect(() => {
     if (!(library instanceof Map) || library.size === 0) return;
-    setDnaWeights(applyDnaOffsets(library, dnaOffsets));
-  }, [library, dnaOffsets]);
+    const weights = applyDnaOffsets(library, dnaOffsets);
+    setDnaWeights(weights);
+    if (user?.uid) saveDNAWeightsFS(user.uid, weights);
+  }, [library, dnaOffsets, user?.uid]);
 
   useEffect(() => {
     if (!corrupted) return;
@@ -2078,49 +2492,100 @@ export default function App() {
     return () => clearTimeout(t);
   }, [corrupted]);
 
-  const handleToggleMute     = useCallback(() => setMuted(v => { if (!v) playSad?.(); return !v; }), [playSad]);
+  const handleToggleMute = useCallback(() => setMuted(v => { if (!v) playSad?.(); return !v; }), [playSad]);
   const handleSiteTintChange = useCallback(t => setSiteTint(t), []);
-  const handleSearch         = e => { e?.preventDefault(); setSearchQuery(searchInput.trim()); };
-  const handleClearSearch    = () => { setSearchInput(""); setSearchQuery(""); };
+  const handleSearch = e => { e?.preventDefault(); setSearchQuery(searchInput.trim()); };
+  const handleClearSearch = () => { setSearchInput(""); setSearchQuery(""); };
 
-  const handleEnter = action => {
-    const auth = action === "login" || action === "register";
-    setIsLoggedIn(auth);
-    setUserMode(auth ? (action === "register" ? "new user" : "user") : "guest");
-    setSearchInput(""); setSearchQuery(""); setSvmMode("raw");
-    setDashKey(k => k + 1);
-    if (!firstLoadFired.current) { firstLoadFired.current = true; setIsFirstLoad(true); setTimeout(() => setIsFirstLoad(false), 1800); }
-    setView("dashboard");
-    if (auth) setTimeout(() => { addToast(action === "register" ? "Account created 🎮" : "Welcome back 👾", "success", `auth:${action}`); setXp(p => p + 50); }, 480);
+  const handleEnter = async (action, email, password, extra) => {
+    try {
+      if (action === "guest") {
+        await loginAsGuest();
+      } else if (action === "google") {
+        const result = await loginWithGoogle();
+        if (result?.linkRequired) return result;
+      } else if (action === "link") {
+        const googleCred = extra; 
+        await linkAccounts(email, password, googleCred);
+      } else if (action === "login") {
+        await loginWithEmail(email, password);
+      } else if (action === "register") {
+        await registerUser(email, password);
+        addToast('Registration successful! Your email is verified via OTP.', 'success');
+      }
+
+      // Explicitly set view for manual auth actions
+      setView("dashboard");
+      setDashKey(k => k + 1);
+      if (!firstLoadFired.current) {
+        firstLoadFired.current = true;
+        setIsFirstLoad(true);
+        setTimeout(() => setIsFirstLoad(false), 1800);
+      }
+    } catch (error) {
+      if (error.message === 'ACCOUNT_NOT_FOUND') {
+        const customErr = new Error("No account linked to this Google profile. Please Register first to set a master password.");
+        if (error.email) customErr.email = error.email;
+        addToast(customErr.message, "error", "auth-err");
+        throw customErr;
+      }
+
+      const visualErrors = ['auth/user-not-found', 'auth/wrong-password', 'auth/invalid-credential'];
+      if (!visualErrors.includes(error.code)) {
+        addToast("Authentication failed", "error", "auth-err");
+      }
+      throw error;
+    }
   };
 
-  const handleLogout = useCallback(() => {
-    setOverlayGame(null);
-    xpGranted.current.clear();
-    firstLoadFired.current = false;
-    prevLevel.current = 1;
-    dispatch({ type: "HYDRATE", rows: [] });
-    setIsLoggedIn(false); setUserMode("guest"); setDnaWeights(null);
-    setDnaOffsets({}); setXp(0); setCorrupted(false); setSiteTint(null);
-    setLevelJustUp(false); setIsFirstLoad(false);
-    setSearchInput(""); setSearchQuery(""); setSvmMode("raw");
-    setIsDiscoveryActive(false);
-    setDashKey(k => k + 1);
-    setView("entry");
-    addToast("Logged out", "info", "logout");
+  const handleLogout = useCallback(async () => {
+    try {
+      await logoutUser();
+      setOverlayGame(null);
+      xpGranted.current.clear();
+      firstLoadFired.current = false;
+      prevLevel.current = 1;
+      dispatch({ type: "HYDRATE", rows: [] });
+      setIsLoggedIn(false); setUserMode("guest"); setDnaWeights(null);
+      setDnaOffsets({}); setXp(0); setCorrupted(false); setSiteTint(null);
+      setLevelJustUp(false); setIsFirstLoad(false);
+      setSearchInput(""); setSearchQuery(""); setSvmMode("raw");
+      setIsDiscoveryActive(false);
+      setDashKey(k => k + 1);
+      setView("entry");
+      addToast("Logged out", "info", "logout");
+    } catch (error) {
+      addToast("Logout failed", "error", "logout-err");
+    }
   }, [addToast]);
 
-  const level      = getLevel(xp);
-  const title      = getTitle(level);
+  const level = getLevel(xp);
+  const title = getTitle(level);
   const xpProgress = getXpProgress(xp);
 
-  const libEntries    = useMemo(() => Array.from((library instanceof Map ? library : new Map()).values()), [library]);
+  const libEntries = useMemo(() => Array.from((library instanceof Map ? library : new Map()).values()), [library]);
   const wishlistCount = useMemo(() => libEntries.filter(e => e.status === "wishlist").length, [libEntries]);
-  const playedCount   = useMemo(() => libEntries.filter(e => e.status === "played").length, [libEntries]);
-  const playingCount  = useMemo(() => libEntries.filter(e => e.status === "playing").length, [libEntries]);
-  const likedCount    = useMemo(() => libEntries.filter(e => e.isLiked).length, [libEntries]);
+  const playedCount = useMemo(() => libEntries.filter(e => e.status === "played").length, [libEntries]);
+  const playingCount = useMemo(() => libEntries.filter(e => e.status === "playing").length, [libEntries]);
+  const likedCount = useMemo(() => libEntries.filter(e => e.isLiked).length, [libEntries]);
 
-  const sharedLib  = { library, dispatch, addToast };
+  const sharedLib = { library, dispatch, addToast };
+
+  // ── Auth Loading Guard ───────────────────────────────────────────────────
+  if (authLoading) {
+    return (
+      <div className="view-guard">
+        <div className="view-guard-inner">
+          <div className="view-guard-scan" />
+          <div className="view-guard-dots">
+            {[0, 1, 2].map(i => <div key={i} className="view-guard-dot" style={{ animationDelay: `${i * 0.18}s` }} />)}
+          </div>
+          <span className="view-guard-label">INITIALISING SYSTEMS…</span>
+        </div>
+      </div>
+    );
+  }
+
   const showChrome = view !== "entry";
 
   return (
@@ -2168,7 +2633,7 @@ export default function App() {
                       exit={{ opacity: 0, x: -20 }}
                       transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}>
                       <Dashboard
-                        userMode={userMode} isLoggedIn={isLoggedIn}
+                        userMode={userMode} isLoggedIn={isLoggedIn} user={user}
                         {...sharedLib}
                         onLogout={handleLogout}
                         onNavigateLibrary={() => setView("library")}
@@ -2195,10 +2660,12 @@ export default function App() {
                       <div className="full-page-scroll">
                         <LibraryPage
                           {...sharedLib}
+                          user={user}
                           dnaWeights={dnaWeights} onDnaWeightsChange={setDnaWeights}
                           dnaOffsets={dnaOffsets} onDnaOffsetsChange={setDnaOffsets}
                           xp={xp} onXpGain={handleXpGain}
-                          onBack={() => { setDashKey(k => k + 1); setView("dashboard"); }} />
+                          onBack={() => { setDashKey(k => k + 1); setView("dashboard"); }}
+                          onGameClick={game => setOverlayGame(game)} />
                       </div>
                     </motion.div>
                   )}
@@ -2221,21 +2688,21 @@ export default function App() {
             </div>
 
             <GlitchPet
-              level={level} 
+              level={level}
               xpProgress={xpProgress}
-              muted={muted} 
-              corrupted={corrupted} 
+              muted={muted}
+              corrupted={corrupted}
               levelJustUp={levelJustUp}
-              view={view} 
+              view={view}
               onToggleMute={handleToggleMute}
-              playHum={playHum} 
-              playDizzy={playDizzy} 
-              playSad={playSad} 
+              playHum={playHum}
+              playDizzy={playDizzy}
+              playSad={playSad}
               playGlitch={playGlitch}
               dnaWeights={dnaWeights}
               libraryCount={library.size}
               onCorrupt={() => { setCorrupted(true); playGlitch?.(); addToast("🔴 CORRUPTED MODE ACTIVATED", "xp", "corrupt"); }}
-              onUncorrupt={() => setCorrupted(false)} 
+              onUncorrupt={() => setCorrupted(false)}
             />
 
             {/* New lightweight Game Detail Modal — portal to document.body */}
@@ -2249,6 +2716,7 @@ export default function App() {
                   addToast={addToast}
                   onClose={() => setOverlayGame(null)}
                   dnaWeights={dnaWeights}
+                  user={user}
                 />
               )}
             </AnimatePresence>

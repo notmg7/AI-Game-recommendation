@@ -1,21 +1,35 @@
 """
-Game Discovery Engine — Flask Backend  V11 "Iron Star Phase 2"
+Game Discovery Engine — Flask Backend  V12 "Dynamic DNA"
 ================================================
-Changes from V10.1:
+CHANGES FROM V11 (Iron Star Phase 2):
 
-  HUB MULTI-QUERY BATCHING (fixes rate-limit "Nothing Found" errors)
-    _hub_platforms  — fetches 50 platforms, then ONE batched /games query
-                      for all platform IDs at once. Sorted generation desc.
-    _hub_companies  — fetches 50 companies, then ONE batched /games query
-                      for all company IDs at once. Sorted developed/published desc.
-    _hub_genres     — already fast (single call), kept as-is.
-    _hub_themes     — already fast (single call), kept as-is.
-    _hub_years      — synthetic list, no IGDB call needed. Kept as-is.
-    _hub_stores     — static, no change.
+  DISCOVERY PIPELINE REWRITE
+    _fetch_discovery_pool()  — NEW: IGDB multi-query that fetches three
+                               independent pools and deduplicates them.
+      Pool A (Global AAA)   — top 40 games sorted by follows, no genre filter.
+      Pool B (DNA AAA)      — top 40 games in the user's top-1 genre by follows.
+      Pool C (DNA Gems)     — top 40 games in the user's top-1 genre by rating.
+      Result: ~80-120 unique, genre-diverse games for the blender.
 
-  HUB_DISPATCH PRUNED
-    Removed: collections, reviews, creators
-    Kept:    platforms, genres, developers, publishers, tags/themes, years, stores
+  svm_rank() REWRITE
+    - Bulletproof cold-start: when pipe is None, a simulated probability is
+      computed directly from the manual gw_ slider weights so the sliders
+      always control the feed (was: neutral 0.5 for everything).
+    - Buckets now use follows-based thresholds (not raw_prob < 0.5 heuristic).
+    - Bucket 3 (Hidden Gems) requires high DNA match AND high rating.
+    - Wildcard bucket uses shuffled low-match games for exploration.
+    - Pattern while-loop: 4 × B1 + 4 × B2 + 5 × B3 + 5 × B4 repeating.
+
+  get_games() PATCH
+    - In discovery_mode the single IGDB call is replaced by
+      _fetch_discovery_pool() when gw_ params are present.
+    - Falls back gracefully to the original single-call path if the
+      multi-query fails or no gw_ params are supplied.
+
+  SYNTAX / STABILITY GUARDS
+    - All IGDB array checks use ()  e.g. genres = (4,5)
+    - All follows/rating reads guarded with  g.get("follows") or 0
+    - Single sort field per IGDB query (no comma-separated sorts)
 
   No other routes changed.
 """
@@ -26,14 +40,22 @@ import json
 import time
 import random
 import logging
+import math
 import datetime
 import requests
 import numpy as np
+import uuid
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+from pathlib import Path
+import firebase_admin
+from firebase_admin import credentials, auth as admin_auth
 
 from flask      import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv     import load_dotenv
-from google import genai
 
 try:
     import psycopg2
@@ -52,7 +74,33 @@ except ImportError:
     SKLEARN_AVAILABLE = False
     logging.warning("scikit-learn not installed — SVM disabled.")
 
-load_dotenv()
+# ── Zero-Failure Environment Loading ──────────────────────────────────────────
+BASE_DIR = Path(__file__).resolve().parent
+dotenv_path = BASE_DIR / ".env"
+load_dotenv(dotenv_path=dotenv_path, override=True)
+
+def startup_audit():
+    keys = ["TWITCH_CLIENT_ID", "SENDER_EMAIL", "SENDER_PASSWORD", "DATABASE_URL"]
+    print("\n" + "╔" + "═"*48 + "╗")
+    print("║      ENVIRONMENT AUDIT [ZERO-FAILURE MODE]     ║")
+    print("╠" + "═"*48 + "╣")
+    for key in keys:
+        # Check both os.getenv and os.environ directly for sanity
+        val = os.environ.get(key)
+        status = "LOCKED" if val else "MISSING"
+        print(f"║ {key:<20} : [{status:^7}]              ║")
+    print("╚" + "═"*48 + "╝\n")
+
+startup_audit()
+
+# ── Firebase Admin Initialization ─────────────────────────────────────────────
+try:
+    cred = credentials.Certificate("serviceAccountKey.json")
+    firebase_admin.initialize_app(cred)
+    logging.info("Firebase Admin initialized successfully.")
+except Exception as e:
+    logging.error(f"Failed to initialize Firebase Admin: {e}")
+
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
@@ -69,9 +117,6 @@ DATABASE_URL     = os.getenv("DATABASE_URL")
 
 
 # ── Glitch Chat: Deterministic Recommendation Engine ──────────────────────────
-# Zero LLM calls. Zero storage. Zero rate limits. Pure logic + psycopg2.
-
-# 10 quirky Glitch response templates — {game} is replaced at runtime.
 _GLITCH_TEMPLATES = [
     "Boop! My sensors indicate you would love {game}! 📡",
     "ALERT: {game} detected in your optimal fun-zone. Proceed immediately.",
@@ -91,7 +136,6 @@ _GLITCH_GREETINGS = [
     "Greetings! I am Glitch. I am ready to find you a game."
 ]
 
-# Fallbacks when the library is too small or DB is unavailable
 _GLITCH_COLD_START = [
     "Heart 3+ games first so I can read your DNA! I'm blind out here. 👾",
     "My sensors are empty... like my soul. Add games to your library!",
@@ -113,26 +157,13 @@ def _top_genres(dna_weights: dict, n: int = 3) -> list:
 
 
 def _recommend_from_db(top_genres: list, user_id: str):
-    """
-    Query user_library for games that:
-      - have a genre slug matching one of top_genres
-      - have a high rating (>= 4.0 out of 5)
-      - are NOT already in the requesting user's library
-    Returns a single game name string, or None if nothing found.
-    """
     conn = get_db()
     if not conn:
         return None
-
     try:
         with conn.cursor() as cur:
-            # genres column is a JSON array string e.g. '["rpg","action"]'
-            # Use ILIKE so matching is case-insensitive and substring-safe.
-            genre_conditions = " OR ".join(
-                ["ul.genres ILIKE %s"] * len(top_genres)
-            )
+            genre_conditions = " OR ".join(["ul.genres ILIKE %s"] * len(top_genres))
             like_args = [f"%{g}%" for g in top_genres]
-
             query = f"""
                 SELECT ul.game_name, ul.rating
                 FROM user_library ul
@@ -146,14 +177,10 @@ def _recommend_from_db(top_genres: list, user_id: str):
             """
             cur.execute(query, like_args + [user_id])
             rows = cur.fetchall()
-
         if not rows:
             return None
-
-        # Pick randomly from top results so replies stay fresh
         pick = random.choice(rows)
         return pick["game_name"]
-
     except Exception as exc:
         logging.error("glitch_chat DB error: %s", exc)
         return None
@@ -163,59 +190,171 @@ def _recommend_from_db(top_genres: list, user_id: str):
 
 @app.route('/api/glitch/chat', methods=['POST'])
 def glitch_chat():
-    """
-    Deterministic Glitch recommendation engine.
-    - No LLM, no Ollama, no PyTorch, 0 GB extra storage.
-    - Reads dnaWeights to find top genres, queries the DB,
-      filters out games already in the user's library,
-      and wraps the result in a quirky robot-style template.
-    - Always returns HTTP 200 with {"reply": "..."} — never 500 or 429.
-    """
     try:
         body        = request.get_json(force=True) or {}
-        user_msg = (body.get("message") or "").lower().strip()
+        user_msg    = (body.get("message") or "").lower().strip()
         dna_weights = body.get("dnaWeights") or {}
         lib_count   = int(body.get("libCount") or 0)
-        # App.jsx sends MOCK_USER_ID; fall back gracefully if omitted
         user_id     = str(body.get("userId") or body.get("user_id") or "anonymous")
 
         if any(greet in user_msg for greet in ["hi", "hello", "hey", "yo"]):
             return jsonify({"reply": random.choice(_GLITCH_GREETINGS)})
-        
+
         match = re.search(r"(?:similar to|like|recommend me)\s+(.+)", user_msg)
         if match:
             target_game = match.group(1).title()
-            # Still get a DNA recommendation to back it up
-            top_genres = _top_genres(dna_weights, n=1)
-            rec_game = _recommend_from_db(top_genres, user_id)
-            
+            top_genres  = _top_genres(dna_weights, n=1)
+            rec_game    = _recommend_from_db(top_genres, user_id)
             if rec_game:
                 return jsonify({"reply": f"Scanning for games like '{target_game}'... My radar locked onto {rec_game}! It matches your DNA profile perfectly."})
 
-        # ── Cold-start guard ──────────────────────────────────────────────────
-        # Need at least 3 library games before DNA is meaningful
         if lib_count < 3 or not dna_weights:
             return jsonify({"reply": random.choice(_GLITCH_COLD_START)})
 
-        # ── Identify top 2-3 genres from DNA weights ──────────────────────────
         top_genres = _top_genres(dna_weights, n=3)
         if not top_genres:
             return jsonify({"reply": random.choice(_GLITCH_COLD_START)})
 
-        # ── Query the DB for a matching, un-owned, high-rated game ────────────
         game_name = _recommend_from_db(top_genres, user_id)
-
         if not game_name:
             return jsonify({"reply": random.choice(_GLITCH_NO_MATCH)})
 
-        # ── Inject game name into a random personality template ───────────────
         reply = random.choice(_GLITCH_TEMPLATES).format(game=game_name)
         return jsonify({"reply": reply})
 
     except Exception as exc:
         logging.error("glitch_chat unexpected error: %s", exc)
-        # Guaranteed non-500 fallback
         return jsonify({"reply": random.choice(_GLITCH_NO_MATCH)})
+
+# ── OTP Verification ──────────────────────────────────────────────────────────
+otp_store = {}
+
+def send_otp_email(target_email, code):
+    sender_email = os.getenv("SENDER_EMAIL")
+    sender_password = os.getenv("SENDER_PASSWORD")
+    
+    if not sender_email or not sender_password:
+        logging.warning("Email credentials not found in environment. OTP printed to console only.")
+        return False
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"Your Discovery Engine OTP: {code}"
+        msg["From"] = f"Game Discovery Engine <{sender_email}>"
+        msg["To"] = target_email
+
+        html = f"""
+        <html>
+        <body style="background-color: #0d0d0d; color: #ffffff; font-family: 'Inter', -apple-system, sans-serif; padding: 40px; text-align: center;">
+            <div style="max-width: 500px; margin: 0 auto; background: #111111; padding: 40px; border-radius: 16px; border: 1px solid #222; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+                <div style="font-size: 24px; font-weight: bold; color: #8b5cf6; margin-bottom: 24px; letter-spacing: 2px;">DISCOVERY ENGINE</div>
+                <h1 style="color: #ffffff; margin-bottom: 16px; font-size: 20px;">Verify Your Identity</h1>
+                <p style="font-size: 16px; color: #94a3b8; line-height: 1.6;">Welcome to the Grid. Use the code below to complete your registration and unlock your Gamer DNA.</p>
+                
+                <div style="background: #1e1e1e; padding: 24px; border-radius: 12px; margin: 32px 0; font-size: 36px; font-weight: 800; letter-spacing: 12px; color: #a78bfa; border: 1px solid #333; text-shadow: 0 0 15px rgba(139, 92, 246, 0.3);">
+                    {code}
+                </div>
+                
+                <p style="font-size: 14px; color: #64748b;">This code will expire in 10 minutes for your security.</p>
+                <div style="height: 1px; background: #222; margin: 32px 0;"></div>
+                <p style="font-size: 12px; color: #475569;">If you didn't request this code, you can safely ignore this email.</p>
+                <p style="font-size: 11px; color: #334155; margin-top: 24px;">© 2026 Game Discovery Engine · Powered by AI DNA</p>
+            </div>
+        </body>
+        </html>
+        """
+        msg.attach(MIMEText(html, "html"))
+
+        # Using Gmail's SMTP server
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            try:
+                server.login(sender_email, sender_password)
+                server.sendmail(sender_email, target_email, msg.as_string())
+            except smtplib.SMTPAuthenticationError:
+                logging.error("SMTP AUTHENTICATION ERROR: The Gmail App Password is likely incorrect or expired.")
+                print("\n" + "!"*60)
+                print("CRITICAL: SMTP Authentication Failed.")
+                print("Check that SENDER_PASSWORD in .env is a 16-character APP PASSWORD.")
+                print("!"*60 + "\n")
+                return False
+        
+        return True
+    except Exception as e:
+        logging.error(f"Failed to send email: {e}")
+        return False
+
+@app.route('/api/auth/send-otp', methods=['POST'])
+def send_otp():
+    try:
+        body = request.get_json(force=True)
+        email = body.get('email')
+        if not email:
+            return jsonify({"error": "Email is required"}), 400
+        
+        # Generate 6-digit numeric code
+        code = f"{random.randint(100000, 999999)}"
+        # Save to store with 10-minute expiry
+        otp_store[email] = {
+            "code": code,
+            "expires": time.time() + 600
+        }
+        
+        # Attempt to send real email
+        email_sent = send_otp_email(email, code)
+        
+        # Log to console as fallback/audit
+        print(f"[OTP] Code for {email} is: {code} (Email Sent: {email_sent})")
+        
+        return jsonify({"message": "OTP sent successfully", "emailSent": email_sent}), 200
+    except Exception as exc:
+        logging.error("send_otp error: %s", exc)
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/auth/verify-otp', methods=['POST'])
+def verify_otp():
+    try:
+        body = request.get_json(force=True)
+        email = body.get('email')
+        code = body.get('code')
+        
+        if not email or not code:
+            return jsonify({"error": "Email and code are required"}), 400
+            
+        record = otp_store.get(email)
+        if not record:
+            return jsonify({"error": "No OTP found for this email"}), 400
+            
+        if time.time() > record["expires"]:
+            del otp_store[email]
+            return jsonify({"error": "OTP has expired"}), 400
+            
+        if record["code"] != code:
+            return jsonify({"error": "Invalid OTP code"}), 400
+            
+        # On success, clear OTP and return token
+        del otp_store[email]
+        v_token = str(uuid.uuid4())
+        
+        # ── Backend Auto-Verify ──
+        # Mark user as email_verified=True in Firebase programmatically
+        try:
+            user_record = admin_auth.get_user_by_email(email)
+            if user_record:
+                admin_auth.update_user(user_record.uid, email_verified=True)
+                logging.info(f"Firebase user {email} marked as verified.")
+        except Exception as e:
+            # User might not exist yet (first time registration), which is fine
+            logging.info(f"Firebase user check: {e}")
+
+        return jsonify({
+            "message": "OTP verified",
+            "verificationToken": v_token
+        }), 200
+    except Exception as exc:
+        logging.error("verify_otp error: %s", exc)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 
 # ── Token cache ───────────────────────────────────────────────────────────────
 _igdb_token_cache = {"token": None, "expires": 0}
@@ -249,7 +388,7 @@ def igdb_img(img_id, size="t_720p"):
 
 # ── Hub result cache ──────────────────────────────────────────────────────────
 _hub_cache: dict = {}
-HUB_CACHE_TTL = 600  # 10 minutes
+HUB_CACHE_TTL = 600
 
 def _hub_cache_get(key):
     entry = _hub_cache.get(key)
@@ -265,19 +404,36 @@ def _hub_cache_set(key, data):
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 GENRE_SLUGS = [
-    "action","indie","adventure","rpg","strategy","shooter",
-    "casual","simulation","puzzle","arcade","platformer","racing",
-    "sports","massively-multiplayer","family","fighting","board-games",
-    "educational","card",
+    "action", "rpg", "strategy", "adventure", "simulation", "sports", "puzzle", "indie"
 ]
 
 IGDB_GENRE_MAP = {
-    4:  "fighting",   5:  "shooter",    8:  "platformer",  9:  "puzzle",
-    10: "racing",     11: "strategy",   12: "rpg",         13: "simulation",
-    14: "sports",     15: "strategy",   16: "strategy",    31: "adventure",
-    32: "indie",      33: "arcade",     35: "card",        36: "massively-multiplayer",
+    4: "action", 5: "action", 8: "action", 10: "action", 33: "action", 25: "action", 7: "action", 30: "action",
+    11: "strategy", 15: "strategy", 16: "strategy", 24: "strategy", 35: "strategy",
+    12: "rpg", 36: "rpg",
+    31: "adventure", 2: "adventure", 34: "adventure",
+    13: "simulation",
+    14: "sports",
+    9: "puzzle", 26: "puzzle",
+    32: "indie"
 }
-SLUG_TO_IGDB_ID = {v: k for k, v in IGDB_GENRE_MAP.items()}
+
+IGDB_THEME_MAP = {
+    1: "action", 19: "action", 21: "action", 23: "action",
+    22: "strategy", 39: "strategy", 41: "strategy",
+    17: "rpg",
+    18: "adventure", 20: "adventure", 31: "adventure", 38: "adventure", 43: "adventure", 44: "adventure",
+    28: "simulation", 32: "simulation", 33: "simulation",
+    34: "puzzle",
+    40: "sports",
+    27: "indie", 35: "indie"
+}
+
+SLUG_TO_IGDB_ID = {}
+for k, v in IGDB_GENRE_MAP.items():
+    if v not in SLUG_TO_IGDB_ID:
+        SLUG_TO_IGDB_ID[v] = []
+    SLUG_TO_IGDB_ID[v].append(str(k))
 
 STORE_META = {
     1:  {"name": "Steam",             "color": "#1b2838", "logo": "steam"},
@@ -297,11 +453,9 @@ HLTB_GENRE_ESTIMATES = {
     "action":     {"main_story": 12,  "completionist": 30 },
     "adventure":  {"main_story": 10,  "completionist": 20 },
     "strategy":   {"main_story": 20,  "completionist": 60 },
-    "shooter":    {"main_story": 8,   "completionist": 20 },
     "puzzle":     {"main_story": 5,   "completionist": 12 },
     "simulation": {"main_story": 30,  "completionist": 80 },
     "indie":      {"main_story": 6,   "completionist": 15 },
-    "racing":     {"main_story": 4,   "completionist": 25 },
     "sports":     {"main_story": 5,   "completionist": 40 },
 }
 HLTB_DEFAULT = {"main_story": 12, "completionist": 30}
@@ -349,6 +503,7 @@ def init_db():
                         is_favorite BOOLEAN     NOT NULL DEFAULT FALSE,
                         playtime    REAL        NOT NULL DEFAULT 0,
                         added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        image_url   TEXT,
                         UNIQUE (user_id, game_id)
                     );
                     CREATE INDEX IF NOT EXISTS idx_ul_user  ON user_library (user_id);
@@ -370,9 +525,13 @@ def init_db():
                         ALTER TABLE user_library
                             ADD COLUMN IF NOT EXISTS playtime REAL NOT NULL DEFAULT 0;
                     """)
+                    cur.execute("""
+                        ALTER TABLE user_library
+                            ADD COLUMN IF NOT EXISTS image_url TEXT;
+                    """)
                 except Exception:
                     pass
-        logging.info("DB initialised (V11.0 Iron Star Phase 2).")
+        logging.info("DB initialised (V12.0 Dynamic DNA).")
     except Exception as exc:
         logging.error("init_db error: %s", exc)
     finally:
@@ -414,26 +573,39 @@ def norm_game(g: dict) -> dict:
         datetime.datetime.fromtimestamp(rel_date).strftime("%Y-%m-%d")
         if rel_date else None
     )
+
     genre_ids = [genre.get("id") for genre in g.get("genres", [])]
-    slugs = [IGDB_GENRE_MAP[gid] for gid in genre_ids if gid in IGDB_GENRE_MAP]
-    names = [s.replace("-", " ").title() for s in slugs]
+    theme_ids = [theme.get("id") for theme in g.get("themes", [])]
+
+    dna_slugs = set()
+    for gid in genre_ids:
+        if gid in IGDB_GENRE_MAP: dna_slugs.add(IGDB_GENRE_MAP[gid])
+    for tid in theme_ids:
+        if tid in IGDB_THEME_MAP: dna_slugs.add(IGDB_THEME_MAP[tid])
+
+    genre_names = [s.replace("-", " ").title() for s in [IGDB_GENRE_MAP[gid] for gid in genre_ids if gid in IGDB_GENRE_MAP]]
+    theme_names = [t.get('name') for t in g.get('themes', [])]
+    all_tags = sorted(list(set(genre_names + theme_names)))
+
     return {
         "id":               g.get("id"),
         "name":             g.get("name"),
         "background_image": igdb_img(g.get("cover", {}).get("image_id"), "t_720p"),
-        "rating":           (g.get("total_rating") or 0) / 20.0,
+        "rating":           (g.get("total_rating") or 0) / 10.0,
         "released":         formatted_date,
-        "genres":           names,
-        "genre_slugs":      slugs,
+        "genres":           genre_names,
+        "genre_slugs":      list(dna_slugs),
+        "dna_slugs":        list(dna_slugs),
         "slug":             g.get("slug"),
         "platforms":        [p.get("name") for p in g.get("platforms", [])],
         "developer":        None,
-        "tags":             [],
+        "tags":             all_tags[:6],
         "hypes":            g.get("hypes", 0),
+        "follows":          g.get("follows") or 0,
     }
 
 
-def _parse_ids(param_str: str) -> list[int]:
+def _parse_ids(param_str: str) -> list:
     result = []
     for part in (param_str or "").split(","):
         part = part.strip()
@@ -442,7 +614,7 @@ def _parse_ids(param_str: str) -> list[int]:
     return result
 
 
-def _ids_clause(igdb_field: str, ids: list[int]) -> str | None:
+def _ids_clause(igdb_field: str, ids: list) -> str | None:
     if not ids:
         return None
     if len(ids) == 1:
@@ -451,31 +623,17 @@ def _ids_clause(igdb_field: str, ids: list[int]) -> str | None:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# MULTI-QUERY BATCH HELPER
+# MULTI-QUERY BATCH HELPER  (used by Hub routes)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _batch_popular_games(igdb_field: str, ids: list[int], limit_per: int = 3) -> dict[int, list]:
+def _batch_popular_games(igdb_field: str, ids: list, limit_per: int = 3) -> dict:
     """
-    Fetch popular game teasers for a list of item IDs in ONE single IGDB
-    request using the multi-query `query` syntax.
-
-    IGDB multi-query packs multiple named sub-queries into one POST body
-    separated by blank lines. Each sub-query is:
-
-        query games "label" {
-          fields name, cover.image_id, total_rating;
-          where <field> = (<id>) & cover != null & total_rating != null;
-          sort total_rating desc;
-          limit <n>;
-        };
-
+    Fetch popular game teasers for a list of item IDs in ONE IGDB multi-query.
     Returns a dict mapping item_id → list of game teasers.
-    Falls back to an empty dict on any error (never crashes the hub call).
     """
     if not ids:
         return {}
 
-    # Build a sub-query for each item ID
     sub_queries = []
     for item_id in ids:
         sub_queries.append(
@@ -500,9 +658,8 @@ def _batch_popular_games(igdb_field: str, ids: list[int], limit_per: int = 3) ->
             logging.warning("multiquery failed: HTTP %s", resp.status_code)
             return {}
 
-        result_map: dict[int, list] = {}
+        result_map: dict = {}
         for block in resp.json():
-            # Each block has "name" = "g<id>" and "result" = [...]
             label = block.get("name", "")
             if not label.startswith("g"):
                 continue
@@ -516,7 +673,7 @@ def _batch_popular_games(igdb_field: str, ids: list[int], limit_per: int = 3) ->
                     "id":     g.get("id"),
                     "name":   g.get("name"),
                     "image":  igdb_img(g.get("cover", {}).get("image_id"), "t_thumb"),
-                    "rating": round((g.get("total_rating") or 0) / 20.0, 1),
+                    "rating":  (g.get("total_rating") or 0) / 10.0,
                 }
                 for g in games_raw
             ]
@@ -528,16 +685,139 @@ def _batch_popular_games(igdb_field: str, ids: list[int], limit_per: int = 3) ->
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# DISCOVERY POOL FETCHER  ← NEW in V12
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Full IGDB fields needed by norm_game
+_GAME_FIELDS = (
+    "fields name, cover.image_id, total_rating, hypes, follows, rating_count, "
+    "first_release_date, genres.id, themes.id, themes.name, slug, platforms.name;"
+)
+
+# Base where-clause common to all discovery pools
+_DISCOVERY_WHERE_BASE = (
+    "cover != null & total_rating != null & total_rating > 0 "
+    f"& first_release_date < {CAP_2026_TS} & first_release_date != null"
+)
+
+
+def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int) -> list:
+    """
+    V13 Proportional DNA Fetcher.
+
+    Builds one IGDB multi-query with one sub-query per active genre
+    (weight > 0).  Games per genre = proportional to slider weight so a
+    genre at 100 gets 4× the slots of one at 25.
+
+    Every sub-query carries a randomised offset (0–150) so clicking
+    "Recalibrate" always fetches a fresh slice from IGDB's catalogue.
+
+    Falls back to a single unfiltered query when no genre IDs map.
+    Never crashes — returns [] on any IGDB error.
+    """
+    # Only genres with a positive weight contribute to the pool
+    active = {slug: w for slug, w in gw.items() if w > 0}
+
+    date_clause = f"first_release_date < {now_ts}"
+    base_where  = _DISCOVERY_WHERE_BASE + f" & {date_clause}"
+
+    if exclude_ids:
+        base_where += f" & id != ({','.join(map(str, exclude_ids))})"
+
+    sub_queries: list = []
+
+    if active:
+        total_weight = sum(active.values())
+        # Allocate a total budget of 150 slots, proportionally per genre.
+        # Floor at 20 per genre so even a low slider gets a meaningful sample.
+        TOTAL_BUDGET = 150
+        for pool_idx, (slug, weight) in enumerate(
+            sorted(active.items(), key=lambda kv: kv[1], reverse=True)
+        ):
+            genre_ids_for_slug = SLUG_TO_IGDB_ID.get(slug, [])
+            if not genre_ids_for_slug:
+                continue
+
+            genre_filter = f"genres = ({','.join(genre_ids_for_slug)})"
+            dna_where    = f"{base_where} & {genre_filter}"
+
+            # Proportional limit, clamped to [20, 50] so IGDB's per-query cap isn't hit
+            proportional = int(round((weight / total_weight) * TOTAL_BUDGET))
+            slot_limit   = max(20, min(50, proportional))
+
+            rand_offset  = random.randint(0, 150)
+
+            sub_queries.append(
+                f'query games "pool_{pool_idx}_{slug}" {{\n'
+                f'  {_GAME_FIELDS}\n'
+                f'  where {dna_where};\n'
+                f'  sort total_rating desc;\n'
+                f'  limit {slot_limit};\n'
+                f'  offset {rand_offset};\n'
+                f'}};'
+            )
+
+    # Fallback: no slug mapped to IGDB IDs — broad unfiltered pool
+    if not sub_queries:
+        rand_offset = random.randint(0, 150)
+        sub_queries.append(
+            f'query games "pool_fallback" {{\n'
+            f'  {_GAME_FIELDS}\n'
+            f'  where {base_where};\n'
+            f'  sort total_rating desc;\n'
+            f'  limit 50;\n'
+            f'  offset {rand_offset};\n'
+            f'}};'
+        )
+
+    body = "\n\n".join(sub_queries)
+
+    try:
+        resp = requests.post(
+            f"{IGDB_BASE}/multiquery",
+            headers=get_igdb_headers(),
+            data=body,
+            timeout=18,
+        )
+        if not resp.ok:
+            logging.warning(
+                "_fetch_discovery_pool: IGDB HTTP %s — %s",
+                resp.status_code, resp.text[:300],
+            )
+            return []
+
+        seen_ids: set  = set()
+        combined: list = []
+        for block in resp.json():
+            for g in (block.get("result") or []):
+                gid = g.get("id")
+                if gid and gid not in seen_ids:
+                    seen_ids.add(gid)
+                    combined.append(norm_game(g))
+
+        logging.info(
+            "_fetch_discovery_pool: %d unique games from %d genre sub-queries",
+            len(combined), len(sub_queries),
+        )
+        return combined
+
+    except Exception as exc:
+        logging.error("_fetch_discovery_pool error: %s", exc)
+        return []
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # SVM ENGINE
 # ═════════════════════════════════════════════════════════════════════════════
 
-def feature_vec(genre_slugs: list, rating: float, gw: dict = None) -> list:
+def feature_vec(dna_slugs: list, rating: float, gw: dict = None) -> list:
     vec = []
+    gw_safe = gw if gw is not None else {}
     for slug in GENRE_SLUGS:
-        flag  = 1.0 if slug in genre_slugs else 0.0
-        scale = (gw or {}).get(slug, 100.0) / 100.0
+        flag  = 1.0 if slug in dna_slugs else 0.0
+        scale = gw_safe.get(slug, 0.0) / 100.0
         vec.append(flag * scale)
-    vec.append(min(float(rating), 5.0) / 5.0)
+    vec.append((min(float(rating), 10.0) / 10.0) * 0.5)
     return vec
 
 
@@ -573,20 +853,82 @@ def train_svm(lib_rows: list, gw: dict = None):
         return None
 
 
-def svm_rank(games: list, pipe, gw: dict = None) -> list:
-    if not pipe or not games:
+def svm_rank(games: list, pipe, gw: dict = None, offsets: dict = None) -> list:
+    """
+    V13 Strict DNA Ranker — zero popularity bias.
+
+    Scoring formula:
+      With SVM model : final_score = (svm_prob * 0.4) + (dna_match_norm * 0.6)
+      Cold start      : final_score = dna_match_norm * (rating / 10.0)
+
+    dna_match is a dot-product of the game's genre presence vector and the
+    user's gw slider values, normalised to [0, 1]:
+      sum(gw[slug] for slug in game_slugs if slug in gw) / (100 * num_genres)
+
+    No follows/popularity term anywhere.  The entire pool is sorted strictly
+    by final_score descending — no bucket blending.
+    """
+    if not games:
         return games
-    X = [feature_vec(g.get("genre_slugs", []), g.get("rating", 0), gw) for g in games]
-    try:
-        probs   = pipe.predict_proba(np.array(X, dtype=np.float32))
-        pos_idx = list(pipe.classes_).index(1)
-        scores  = probs[:, pos_idx]
-    except Exception as exc:
-        logging.warning("SVM scoring failed: %s", exc)
-        return games
-    ranked = [{**g, "svm_score": float(s)} for g, s in zip(games, scores) if s >= 0.3]
-    ranked.sort(key=lambda x: x["svm_score"], reverse=True)
-    return ranked
+
+    gw_safe = gw or {}
+
+    # ── 1. Get SVM probabilities (or skip if cold start) ────────────────────
+    if pipe is not None:
+        X = [feature_vec(g.get("dna_slugs", []), g.get("rating", 0), gw_safe)
+             for g in games]
+        try:
+            probs      = pipe.predict_proba(np.array(X, dtype=np.float32))
+            pos_idx    = list(pipe.classes_).index(1)
+            svm_probs  = list(probs[:, pos_idx])
+        except Exception as exc:
+            logging.warning("SVM scoring failed: %s — cold start fallback", exc)
+            pipe      = None          # treat as cold start
+            svm_probs = [0.0] * len(games)
+    else:
+        svm_probs = [0.0] * len(games)
+
+    # ── 2. Score every game ──────────────────────────────────────────────────
+    scored_games = []
+    for i, g in enumerate(games):
+        svm_prob   = float(svm_probs[i])
+        rating     = g.get("rating") or 0.0     # already on 0–10 scale
+
+        game_slugs = g.get("dna_slugs") or g.get("genre_slugs") or []
+
+        # Dot-product DNA match: sum of slider weights for each matching genre
+        # Normalised to [0, 1] by dividing by (100 × number of game genres).
+        if game_slugs and gw_safe:
+            raw_dot   = sum(gw_safe.get(s, 0.0) for s in game_slugs if s in GENRE_SLUGS)
+            max_dot   = 100.0 * len(game_slugs)        # theoretical maximum
+            dna_match = raw_dot / max_dot if max_dot > 0 else 0.0
+        else:
+            dna_match = 0.0
+
+        if pipe is not None:
+            # SVM active: blend AI signal (40 %) with DNA match (60 %)
+            final_score = (svm_prob * 0.4) + (dna_match * 0.6)
+        else:
+            # Cold start: DNA match weighted by 10-pt rating quality
+            final_score = dna_match * (rating / 10.0)
+
+        scored_games.append({
+            **g,
+            "svm_score": round(final_score, 6),
+            "raw_prob":  round(svm_prob, 6),
+            "dna_match": round(dna_match * 100, 1),   # expose as 0–100 % for UI
+        })
+
+    # ── 3. Strict sort by final_score descending — no buckets ───────────────
+    result = sorted(scored_games, key=lambda x: x["svm_score"], reverse=True)
+
+    logging.info(
+        "svm_rank: %d games scored & sorted (mode=%s, top_score=%.4f)",
+        len(result),
+        "svm" if pipe is not None else "cold_start",
+        result[0]["svm_score"] if result else 0,
+    )
+    return result
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -600,7 +942,7 @@ def steam_pc_requirements(game_name: str) -> dict | None:
         search_resp = requests.get(
             "https://store.steampowered.com/api/storesearch/",
             params={"term": game_name, "l": "en", "cc": "us"},
-            headers={"User-Agent": "GameDiscoveryEngine/11.0"},
+            headers={"User-Agent": "GameDiscoveryEngine/12.0"},
             timeout=6,
         )
         if not search_resp.ok:
@@ -608,209 +950,133 @@ def steam_pc_requirements(game_name: str) -> dict | None:
         items = search_resp.json().get("items", [])
         if not items:
             return None
-        app_id = None
-        name_lower = game_name.lower()
-        for item in items[:5]:
-            if item.get("name", "").lower() == name_lower:
-                app_id = item.get("id")
-                break
-        if not app_id:
-            app_id = items[0].get("id")
-        if not app_id:
+        steam_id = items[0].get("id")
+        if not steam_id:
             return None
-        detail_resp = requests.get(
-            "https://store.steampowered.com/api/appdetails",
-            params={"appids": app_id, "l": "en", "filters": "pc_requirements"},
-            headers={"User-Agent": "GameDiscoveryEngine/11.0"},
+
+        app_resp = requests.get(
+            f"https://store.steampowered.com/api/appdetails/",
+            params={"appids": steam_id, "l": "en", "cc": "us"},
+            headers={"User-Agent": "GameDiscoveryEngine/12.0"},
             timeout=8,
         )
-        if not detail_resp.ok:
+        if not app_resp.ok:
             return None
-        data = detail_resp.json().get(str(app_id), {})
-        if not data.get("success"):
+        app_data = app_resp.json().get(str(steam_id), {})
+        if not app_data.get("success"):
             return None
-        reqs    = data.get("data", {}).get("pc_requirements", {})
-        minimum = reqs.get("minimum", "")
-        recc    = reqs.get("recommended", "")
-        if not minimum and not recc:
-            return None
-        def strip_html(s):
-            return re.sub(r"<[^>]+>", "\n", s or "").strip()
-        result = {}
-        if minimum: result["minimum"]     = strip_html(minimum)
-        if recc:    result["recommended"] = strip_html(recc)
-        return result if result else None
-    except Exception as exc:
-        logging.warning("steam_pc_requirements failed: %s", exc)
+        pc = app_data.get("data", {}).get("pc_requirements", {})
+        return {
+            "minimum":     pc.get("minimum", STEAM_FALLBACK_MSG),
+            "recommended": pc.get("recommended", STEAM_FALLBACK_MSG),
+        }
+    except Exception:
         return None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# HUB DATA FETCHERS  — V11: Multi-Query batching for platforms + companies
-# Each returns a list of dicts:
-#   {id, name, slug?, description?, logo?, game_count?, popular_games[]}
+# HUB HELPERS  (unchanged from V11)
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _hub_platforms() -> list:
-    """
-    Top platforms with RAWG-style prioritization.
-    Ensures PC and modern consoles appear first.
-    """
-    # 1. Define the 'Power List' (Priority IDs)
-    # 6: PC, 167: PS5, 130: Switch, 169: Xbox Series, 48: PS4, 49: Xbox One
-    top_priority_ids = [6, 167, 130, 169, 48, 49]
-    ids_str = ",".join(map(str, top_priority_ids))
-
-    # 2. Query IGDB
-    # We include our priority list OR any platform from Generation 7 and up
+    top_priority_ids = [6, 48, 167, 49, 130, 169]
     q = (
-        f"fields id, name, slug, summary, generation, "
-        f"versions.platform_logo.image_id; "
-        f"where id = ({ids_str}) | (generation != null & generation > 6); "
-        f"limit 80;" 
+        "fields id, name, slug, summary, generation, platform_logo.image_id; "
+        "where platform_logo != null; "
+        "sort generation desc; limit 50;"
     )
-    
-    resp = requests.post(
-        f"{IGDB_BASE}/platforms", headers=get_igdb_headers(), data=q, timeout=12
-    )
+    resp = requests.post(f"{IGDB_BASE}/platforms", headers=get_igdb_headers(), data=q, timeout=12)
     if not resp.ok:
         return []
-
     platforms = resp.json()
-    if not platforms:
-        return []
-
-    # 3. Batch fetch popular games for the UI teasers
     platform_ids = [p["id"] for p in platforms if p.get("id")]
-    popular_map = _batch_popular_games("platforms", platform_ids, limit_per=3)
+    popular_map  = _batch_popular_games("platforms", platform_ids, limit_per=3)
 
-    # 4. Build the items list
     items = []
     for p in platforms:
-        pid = p.get("id")
-        
-        # Logo extraction
-        logo_id = None
-        for v in (p.get("versions") or []):
-            lid = (v.get("platform_logo") or {}).get("image_id")
-            if lid:
-                logo_id = lid
-                break
-        
+        pid     = p.get("id")
+        logo_id = (p.get("platform_logo") or {}).get("image_id")
         items.append({
             "id":            pid,
             "name":          p.get("name"),
             "slug":          p.get("slug"),
-            "generation":    p.get("generation", 0),
             "description":   p.get("summary", ""),
+            "generation":    p.get("generation", 0),
             "logo":          igdb_img(logo_id, "t_logo_med") if logo_id else None,
             "popular_games": popular_map.get(pid, []),
         })
 
-    # 5. Intelligent Sorting
-    # Sort Key Priority: 
-    #   A) Is it in our top_priority_ids list? (Index 0 to 5)
-    #   B) Modernity (Generation desc)
-    #   C) Alphabetical
     def sort_logic(x):
-        try:
-            # If in top list, get its position (0, 1, 2...)
-            priority_idx = top_priority_ids.index(x['id'])
-        except ValueError:
-            # If not in top list, put it after (999)
-            priority_idx = 999
-        
+        try:    priority_idx = top_priority_ids.index(x['id'])
+        except ValueError: priority_idx = 999
         return (priority_idx, -(x['generation'] or 0), x['name'])
 
     return sorted(items, key=sort_logic)
 
 
 def _hub_genres() -> list:
-    """
-    Merges IGDB Genres and Themes into one 'Vibe' filter.
-    Prioritizes popular categories like Action, RPG, and Horror.
-    """
-    # 1. Define Priority Lists (The ones users want most)
-    # Genres: 31=Adventure, 12=RPG, 5=Shooter, 11=Strategy, 32=Indie, 4=Fighting, 25=Hack and slash
-    # Themes: 19=Horror, 21=Survival, 38=Open World, 18=Sci-Fi, 1=Action
     priority_genres = [31, 12, 5, 11, 32, 25]
     priority_themes = [19, 21, 38, 18, 1]
 
-    # 2. Fetch both from IGDB
     headers = get_igdb_headers()
-    g_resp = requests.post(f"{IGDB_BASE}/genres", headers=headers, data="fields id, name, slug; limit 50;", timeout=10)
-    t_resp = requests.post(f"{IGDB_BASE}/themes", headers=headers, data="fields id, name, slug; limit 50;", timeout=10)
-    
+    g_resp  = requests.post(f"{IGDB_BASE}/genres", headers=headers, data="fields id, name, slug; limit 50;", timeout=10)
+    t_resp  = requests.post(f"{IGDB_BASE}/themes", headers=headers, data="fields id, name, slug; limit 50;", timeout=10)
     genres_raw = g_resp.json() if g_resp.ok else []
     themes_raw = t_resp.json() if t_resp.ok else []
 
-    # 3. Batch Popular Game Teasers
-    g_ids = [x['id'] for x in genres_raw]
-    t_ids = [x['id'] for x in themes_raw]
+    g_ids     = [x['id'] for x in genres_raw]
+    t_ids     = [x['id'] for x in themes_raw]
     g_popular = _batch_popular_games("genres", g_ids, limit_per=3)
     t_popular = _batch_popular_games("themes", t_ids, limit_per=3)
 
     combined = []
-    
-    # Process Genres
     for g in genres_raw:
         combined.append({
             "id": g['id'], "name": g['name'], "slug": g['slug'], "type": "genre",
             "popular_games": g_popular.get(g['id'], [])
         })
-    
-    # Process Themes
     for t in themes_raw:
-        # Avoid duplicate names (e.g. if 'Action' exists in both)
-        if any(i['name'].lower() == t['name'].lower() for i in combined): continue
+        t_name = t.get('name')
+        if not t_name or any(i.get('name', '').lower() == t_name.lower() for i in combined):
+            continue
         combined.append({
             "id": t['id'], "name": t['name'], "slug": t['slug'], "type": "theme",
             "popular_games": t_popular.get(t['id'], [])
         })
 
-    # 4. Smart Priority Sorting
     def sort_vibe(x):
-        # Top Priority (Specific Big Genres/Themes)
         if x['type'] == 'genre' and x['id'] in priority_genres:
             return (0, priority_genres.index(x['id']))
         if x['type'] == 'theme' and x['id'] in priority_themes:
-            return (0, priority_themes.index(x['id']) + 10) # Offset themes slightly
-        # Regular Priority (Alphabetical)
+            return (0, priority_themes.index(x['id']) + 10)
         return (1, x['name'])
 
     return sorted(combined, key=sort_vibe)
 
 
 def _hub_companies(is_developer: bool) -> list:
-    role_field = "developed" if is_developer else "published"
-    igdb_field = "involved_companies.company"
-
-    # Priority IDs (Ensuring we get the 'Parent' entities)
+    role_field      = "developed" if is_developer else "published"
+    igdb_field      = "involved_companies.company"
     top_company_ids = [104, 37, 26, 70, 1, 14, 10110, 421, 126, 250, 112]
-    ids_str = ",".join(map(str, top_company_ids))
+    ids_str         = ",".join(map(str, top_company_ids))
 
-    # We remove the 'role_field != null' requirement for priority IDs
-    # This ensures Square Enix (ID 26) shows up even in the Dev list
     q = (
         f"fields id, name, slug, description, logo.image_id, {role_field}; "
         f"where (id = ({ids_str})) | (logo != null & {role_field} != null); "
-        f"sort {role_field} desc; limit 100;" 
+        f"sort {role_field} desc; limit 100;"
     )
-    
     resp = requests.post(f"{IGDB_BASE}/companies", headers=get_igdb_headers(), data=q, timeout=12)
-    if not resp.ok: return []
-    companies = resp.json()
-
+    if not resp.ok:
+        return []
+    companies   = resp.json()
     company_ids = [c["id"] for c in companies if c.get("id")]
     popular_map = _batch_popular_games(igdb_field, company_ids, limit_per=3)
 
     items = []
     for c in companies:
-        cid = c.get("id")
+        cid       = c.get("id")
         role_data = c.get(role_field, [])
-        # Fallback to 0 if the field is missing or not a list
-        count = len(role_data) if isinstance(role_data, list) else 0
-        
+        count     = len(role_data) if isinstance(role_data, list) else 0
         items.append({
             "id":            cid,
             "name":          c.get("name"),
@@ -830,18 +1096,13 @@ def _hub_companies(is_developer: bool) -> list:
 
 
 def _hub_themes() -> list:
-    """IGDB themes (Horror, Sci-fi, etc.). Popular games via multi-query batch."""
-    q = "fields id, name, slug; limit 50;"
-    resp = requests.post(
-        f"{IGDB_BASE}/themes", headers=get_igdb_headers(), data=q, timeout=10
-    )
+    q    = "fields id, name, slug; limit 50;"
+    resp = requests.post(f"{IGDB_BASE}/themes", headers=get_igdb_headers(), data=q, timeout=10)
     if not resp.ok:
         return []
-
-    themes = resp.json()
-    theme_ids = [t["id"] for t in themes if t.get("id")]
+    themes     = resp.json()
+    theme_ids  = [t["id"] for t in themes if t.get("id")]
     popular_map = _batch_popular_games("themes", theme_ids, limit_per=3)
-
     items = []
     for t in themes:
         tid = t.get("id")
@@ -857,7 +1118,6 @@ def _hub_themes() -> list:
 
 
 def _hub_years() -> list:
-    """Synthetic year buckets 1980 → current+1. No IGDB call needed."""
     current_year = datetime.datetime.now().year
     years = list(range(current_year + 1, 1979, -1))
     return [
@@ -874,7 +1134,6 @@ def _hub_years() -> list:
 
 
 def _hub_stores() -> list:
-    """Static list from STORE_META — no IGDB call needed."""
     return [
         {
             "id":            sid,
@@ -889,7 +1148,6 @@ def _hub_stores() -> list:
     ]
 
 
-# ── HUB TYPE DISPATCH — V11: Collections, Reviews, Creators removed ───────────
 HUB_DISPATCH = {
     "platforms":  (lambda: _hub_platforms()),
     "genres":     (lambda: _hub_genres()),
@@ -913,28 +1171,19 @@ def health():
         "igdb_auth": bool(TWITCH_CLIENT_ID and TWITCH_SECRET),
         "db":        PSYCOPG2_AVAILABLE and bool(DATABASE_URL),
         "svm":       SKLEARN_AVAILABLE,
-        "version":   "v11.0-iron-star-phase2",
+        "version":   "v13.0-strict-dna",
     })
 
 
 # ── GET /api/hub/<type> ────────────────────────────────────────────────────────
 @app.route("/api/hub/<string:hub_type>", methods=["GET"])
 def get_hub(hub_type: str):
-    """
-    Generic Selection Hub endpoint.
-    Returns top 50 items for the given category type.
-    Results cached in-process for 10 minutes.
-    Supported types (V11): platforms, genres, developers, publishers,
-                           tags, themes, years, stores.
-    """
     hub_type = hub_type.lower().strip()
     if hub_type not in HUB_DISPATCH:
         return jsonify({"error": f"Unknown hub type: {hub_type}"}), 404
-
     cached = _hub_cache_get(hub_type)
     if cached is not None:
         return jsonify({"type": hub_type, "results": cached, "cached": True})
-
     try:
         results = HUB_DISPATCH[hub_type]()
         _hub_cache_set(hub_type, results)
@@ -946,10 +1195,8 @@ def get_hub(hub_type: str):
 
 # ── GET /api/games ─────────────────────────────────────────────────────────────
 @app.route("/api/games", methods=["GET"])
-# ── GET /api/games ─────────────────────────────────────────────────────────────
-@app.route("/api/games", methods=["GET"])
 def get_games():
-    # 1. Capture all parameters
+    # ── 1. Parse all query parameters ────────────────────────────────────────
     exclude_ids    = _parse_ids(request.args.get("exclude_ids", ""))
     search         = request.args.get("search", "")
     page           = max(1, request.args.get("page", 1, type=int))
@@ -962,7 +1209,6 @@ def get_games():
     dates          = request.args.get("dates", "")
     is_awaited_req = request.args.get("awaited", "false").lower() == "true"
 
-    # Multi-filter params
     platform_ids   = _parse_ids(request.args.get("platform_ids", ""))
     genre_ids      = _parse_ids(request.args.get("genre_ids", ""))
     company_ids    = _parse_ids(request.args.get("company_ids", ""))
@@ -972,15 +1218,86 @@ def get_games():
     rating_min     = request.args.get("rating_min", 0, type=float)
     genre_slug     = request.args.get("genre", "")
 
-    # 2. Initialize Core Variables
     now_ts = int(time.time())
+
+    # ── 2. Parse DNA slider weights (gw_<slug>) and offsets ───────────────────
+    gw: dict = {}
+    offsets: dict = {}
+    if discovery_mode and user_id:
+        for slug in GENRE_SLUGS:
+            val = request.args.get(f"gw_{slug}", type=float)
+            if val is not None:
+                gw[slug] = max(0.0, min(100.0, val))
+            
+            off_val = request.args.get(f"offset_{slug}", type=float)
+            if off_val is not None:
+                offsets[slug] = off_val
+
+    # ── 3. DISCOVERY MODE — Dynamic Multi-Query Pool ──────────────────────────
+    #
+    # Only activate when:
+    #   • discovery_mode=true
+    #   • user_id is set
+    #   • At least one gw_ param was passed (sliders are active)
+    #   • Not a search, not awaited, no active hub filters
+    #
+    _use_dynamic_pool = (
+        discovery_mode
+        and user_id
+        and bool(gw)
+        and not search
+        and not is_awaited_req
+        and not platform_ids
+        and not genre_ids
+        and not company_ids
+        and not theme_ids
+        and not year_filter
+        and not dates
+    )
+
+    if _use_dynamic_pool:
+        games    = _fetch_discovery_pool(gw, exclude_ids, now_ts)
+        svm_mode = "raw"
+
+        if games:
+            # Train SVM (if the user has liked games), then blend
+            try:
+                lib  = fetch_user_library(user_id)
+                pipe = None
+                if lib and any(r.get("is_liked") for r in lib):
+                    pipe = train_svm(lib, gw or None)
+
+                ranked   = svm_rank(games, pipe, gw or None, offsets)
+                games    = ranked if ranked else sorted(games, key=lambda x: x.get("rating") or 0, reverse=True)
+                svm_mode = "svm" if pipe else "cold_start"
+
+            except Exception as svm_exc:
+                logging.error("Discovery SVM ranking failed: %s", svm_exc)
+                games    = sorted(games, key=lambda x: x.get("rating") or 0, reverse=True)
+                svm_mode = "cold_start"
+
+            return jsonify({
+                "results":  games,
+                "count":    IGDB_TOTAL_COUNT,
+                "next":     None,       # multi-query pool is a single-page result
+                "previous": None,
+                "svm_mode": svm_mode,
+            })
+
+        # If multi-query returned nothing (edge case / API hiccup),
+        # fall through to the legacy single-query path below.
+        logging.warning("_fetch_discovery_pool returned empty — falling back to legacy path")
+
+    # ── 4. LEGACY SINGLE-QUERY PATH ───────────────────────────────────────────
+    #  (used for search, hub filters, awaited, non-discovery browsing, and as
+    #   a fallback if the multi-query fails)
+
     where_parts = []
     sort_clause = ""
     current_limit = limit
-    is_upcoming = False
+    is_upcoming   = False
     is_hype_query = False
 
-    # 3. Mode Detection (Hype/Upcoming)
     if dates:
         _d = dates.split(",")
         if len(_d) == 2:
@@ -989,29 +1306,27 @@ def get_games():
                 if _start_ts > now_ts: is_upcoming = True
                 if _d[1].strip().startswith(("2026", "2027")): is_hype_query = True
             except ValueError: pass
-    
+
     if any(y in ("2026", "2027") for y in (year_filter or "").split(",")):
         is_hype_query = True
 
-    # 4. Integrated Date Filtering (The "Where" Clause)
     if is_awaited_req:
-        # Dynamic Most Awaited: No hardcoded dates, strictly future + hyped
         where_parts.append(f"first_release_date > {now_ts}")
         where_parts.append("hypes > 0")
-        sort_clause = "sort hypes desc;"
+        sort_clause   = "sort hypes desc;"
         current_limit = max(20, limit)
-        
+
     elif year_filter:
         years = [y.strip() for y in year_filter.split(",") if y.strip().isdigit()]
         if years:
             year_clauses = []
             for y in years:
-                y_int = int(y)
+                y_int    = int(y)
                 ts_start = int(datetime.datetime(y_int, 1, 1).timestamp())
                 ts_end   = int(datetime.datetime(y_int, 12, 31, 23, 59, 59).timestamp())
                 year_clauses.append(f"(first_release_date >= {ts_start} & first_release_date <= {ts_end})")
             where_parts.append(f"({' | '.join(year_clauses)})")
-            
+
     elif dates:
         parts = dates.split(",")
         if len(parts) == 2:
@@ -1021,23 +1336,20 @@ def get_games():
                 where_parts.append(f"first_release_date >= {ts_from} & first_release_date <= {ts_to}")
             except ValueError: pass
     else:
-        # Browse Feed default: Only released games
         where_parts.append(f"first_release_date < {now_ts}")
         where_parts.append(f"first_release_date < {CAP_2026_TS}")
         where_parts.append("first_release_date != null")
 
-    # 5. Global Exclusion & Quality Filters
     if exclude_ids:
         where_parts.append(f"id != ({','.join(map(str, exclude_ids))})")
 
     if not search and not is_upcoming and not is_awaited_req:
         where_parts.append("total_rating != null & total_rating > 0")
 
-    # 6. Multi-filter Logic
     for clause in [
         _ids_clause("platforms", platform_ids),
         _ids_clause("genres", genre_ids) if genre_ids else (
-            f"genres = [{SLUG_TO_IGDB_ID[genre_slug]}]" if genre_slug and genre_slug in SLUG_TO_IGDB_ID else None
+            f"genres = ({','.join(SLUG_TO_IGDB_ID[genre_slug])})" if genre_slug and genre_slug in SLUG_TO_IGDB_ID else None
         ),
         _ids_clause("involved_companies.company", company_ids),
         _ids_clause("themes", theme_ids),
@@ -1049,15 +1361,18 @@ def get_games():
         where_parts.append(f"total_rating >= {rating_min}")
 
     where_parts.append("cover != null")
-    where_clause = f"where {' & '.join(where_parts)};" if where_parts else ""
 
-    # 7. Final Sort Determination
-    # If a specific sort wasn't set by "Awaited" logic, determine it here
+    if not search:
+        where_clause = f"where {' & '.join(where_parts)};" if where_parts else ""
+    else:
+        search_safe_parts = [p for p in where_parts if p == "cover != null"]
+        where_clause = f"where {' & '.join(search_safe_parts)};" if search_safe_parts else ""
+
     if not sort_clause:
         if search:
             sort_clause = ""
         elif discovery_mode:
-            sort_clause = "sort total_rating desc;"
+            sort_clause = "sort follows desc;"
         elif is_upcoming:
             sort_clause = "sort first_release_date asc;"
         elif is_hype_query or "hypes" in ordering:
@@ -1067,12 +1382,11 @@ def get_games():
         elif "metacritic" in ordering or "rating" in ordering:
             sort_clause = "sort total_rating desc;"
         else:
-            sort_clause = "sort first_release_date desc;"
+            sort_clause = "sort follows desc;"
 
-    # 8. IGDB Request Execution
-    fields = "fields name, cover.image_id, total_rating, hypes, follows, first_release_date, genres.id, slug, platforms.name;"
+    fields            = "fields name, cover.image_id, total_rating, hypes, follows, first_release_date, genres.id, themes.id, themes.name, slug, platforms.name;"
     pagination_clause = f"limit {current_limit}; offset {offset};"
-    
+
     if search:
         query_body = f"{fields} search \"{search}\"; {where_clause} {pagination_clause}"
     else:
@@ -1086,27 +1400,24 @@ def get_games():
         logging.error("IGDB /games error: %s", exc)
         return jsonify({"error": str(exc)}), 503
 
-    games = [norm_game(g) for g in raw_data]
+    games    = [norm_game(g) for g in raw_data]
     svm_mode = "raw"
 
-    # 9. SVM Discovery Ranking
+    # SVM ranking for legacy discovery path (when dynamic pool fallback)
     if discovery_mode and user_id and SKLEARN_AVAILABLE and not search:
-        gw = {}
-        for slug in GENRE_SLUGS:
-            val = request.args.get(f"gw_{slug}", type=float)
-            if val is not None: gw[slug] = max(0.0, min(100.0, val))
-        
-        lib = fetch_user_library(user_id)
-        if any(r.get("is_liked") for r in lib):
-            pipe = train_svm(lib, gw or None)
-            if pipe:
-                ranked = svm_rank(games, pipe, gw or None)
-                games = ranked if ranked else sorted(games, key=lambda x: x["rating"], reverse=True)
-                svm_mode = "svm" if ranked else "cold_start"
-            else:
-                games = sorted(games, key=lambda x: x["rating"], reverse=True)
-                svm_mode = "cold_start"
-        else:
+        try:
+            lib  = fetch_user_library(user_id)
+            pipe = None
+            if lib and any(r.get("is_liked") for r in lib):
+                pipe = train_svm(lib, gw or None)
+
+            ranked   = svm_rank(games, pipe, gw or None, offsets)
+            games    = ranked if ranked else sorted(games, key=lambda x: x.get("rating") or 0, reverse=True)
+            svm_mode = "svm" if pipe else "cold_start"
+
+        except Exception as svm_exc:
+            logging.error("Legacy SVM ranking failed: %s", svm_exc)
+            games    = sorted(games, key=lambda x: x.get("rating") or 0, reverse=True)
             svm_mode = "cold_start"
 
     return jsonify({
@@ -1121,10 +1432,9 @@ def get_games():
 # ── GET /api/games/<id> ────────────────────────────────────────────────────────
 @app.route("/api/games/<int:game_id>", methods=["GET"])
 def get_game(game_id: int):
-    # Expanded IGDB fields: age_ratings, videos, full company roles, Steam website
     query = (
         f"fields name, summary, cover.image_id, total_rating, first_release_date, "
-        f"genres.id, slug, platforms.name, screenshots.image_id, "
+        f"genres.id, themes.name, slug, platforms.name, screenshots.image_id, "
         f"websites.url, websites.category, "
         f"involved_companies.company.name, involved_companies.developer, involved_companies.publisher, "
         f"age_ratings.category, age_ratings.rating, "
@@ -1132,9 +1442,7 @@ def get_game(game_id: int):
         f"where id = {game_id};"
     )
     try:
-        resp = requests.post(
-            f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query, timeout=10
-        )
+        resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         if not data:
@@ -1143,19 +1451,13 @@ def get_game(game_id: int):
     except Exception as exc:
         return jsonify({"error": str(exc)}), 503
 
-    # Developers and Publishers (separate lists from involved_companies)
-    developers = []
-    publishers = []
+    developers, publishers = [], []
     for ic in d.get("involved_companies", []):
         cname = ic.get("company", {}).get("name")
-        if not cname:
-            continue
-        if ic.get("developer"):
-            developers.append(cname)
-        if ic.get("publisher"):
-            publishers.append(cname)
+        if not cname: continue
+        if ic.get("developer"):  developers.append(cname)
+        if ic.get("publisher"):  publishers.append(cname)
 
-    # ESRB rating — category=1 is ESRB in IGDB
     ESRB_MAP = {1: "RP", 2: "EC", 3: "E", 4: "E10+", 5: "T", 6: "M", 7: "AO"}
     esrb_rating = "Not Rated"
     for ar in d.get("age_ratings", []):
@@ -1163,7 +1465,6 @@ def get_game(game_id: int):
             esrb_rating = ESRB_MAP.get(ar.get("rating"), "Not Rated")
             break
 
-    # First YouTube trailer from IGDB videos
     trailer_url = None
     for v in d.get("videos", []):
         vid = v.get("video_id")
@@ -1171,29 +1472,34 @@ def get_game(game_id: int):
             trailer_url = f"https://www.youtube.com/watch?v={vid}"
             break
 
-    # Steam store URL (website category 13 = Steam)
     steam_url = None
     for w in d.get("websites", []):
         if w.get("category") == 13:
             steam_url = w.get("url")
             break
 
-    # Genres
     genre_ids = [g.get("id") for g in d.get("genres", [])]
-    slugs     = [IGDB_GENRE_MAP[gid] for gid in genre_ids if gid in IGDB_GENRE_MAP]
-    names     = [s.replace("-", " ").title() for s in slugs]
+    theme_ids = [t.get("id") for t in d.get("themes", [])]
 
-    # HLTB — genre-based estimate, instant, zero network cost
+    dna_slugs = set()
+    for gid in genre_ids:
+        if gid in IGDB_GENRE_MAP: dna_slugs.add(IGDB_GENRE_MAP[gid])
+    for tid in theme_ids:
+        if tid in IGDB_THEME_MAP: dna_slugs.add(IGDB_THEME_MAP[tid])
+
+    slugs = list(dna_slugs)
+    names = sorted(list(set(s.replace("-", " ").title() for s in [IGDB_GENRE_MAP[gid] for gid in genre_ids if gid in IGDB_GENRE_MAP])))
+    theme_names = [t.get('name') for t in d.get('themes', [])]
+    all_tags = sorted(list(set(names + theme_names)))
+
     hltb = HLTB_DEFAULT.copy()
     for s in slugs:
         if s in HLTB_GENRE_ESTIMATES:
             hltb = HLTB_GENRE_ESTIMATES[s].copy()
             break
 
-    # Steam PC requirements (falls back to None on any failure, overlay shows N/A)
-    pc_reqs = steam_pc_requirements(d.get("name", ""))
-
-    rel = d.get("first_release_date")
+    pc_reqs  = steam_pc_requirements(d.get("name", ""))
+    rel      = d.get("first_release_date")
     released = datetime.datetime.fromtimestamp(rel).strftime("%Y-%m-%d") if rel else None
 
     return jsonify({
@@ -1205,8 +1511,8 @@ def get_game(game_id: int):
             if d.get("screenshots") else None
         ),
         "description_raw":  d.get("summary"),
-        "rating":           (d.get("total_rating") or 0) / 20.0,
-        "rating_top":       5,
+        "rating":           (d.get("total_rating") or 0) / 10.0,
+        "rating_top":       10,
         "released":         released,
         "playtime":         None,
         "website":          d.get("websites", [{}])[0].get("url") if d.get("websites") else None,
@@ -1214,11 +1520,12 @@ def get_game(game_id: int):
         "trailer_url":      trailer_url,
         "clip":             {"clip": trailer_url} if trailer_url else None,
         "genres":           names,
-        "genre_slugs":      slugs,
+        "genre_slugs":      list(dna_slugs),
+        "dna_slugs":        list(dna_slugs),
         "platforms":        [p.get("name") for p in d.get("platforms", [])],
         "developers":       developers,
         "publishers":       publishers,
-        "tags":             [],
+        "tags":             all_tags[:6],
         "esrb_rating":      esrb_rating,
         "pc_requirements":  pc_reqs,
         "mac_requirements": None,
@@ -1230,48 +1537,12 @@ def get_game(game_id: int):
     })
 
 
-# ── POST /api/games/<id>/dna-match ────────────────────────────────────────────
-@app.route("/api/games/<int:game_id>/dna-match", methods=["POST"])
-def dna_match(game_id: int):
-    """
-    Pure-math DNA compatibility score. No LLM, no external API.
-    Receives { dnaWeights: {slug: 0-100}, genreSlugs: [str] }.
-    Returns { match: int, label: str }.
-
-    Algorithm: average the user's DNA weight for each genre the game
-    has → clamp to [0,100]. Default 50 when no overlap found.
-    """
-    body        = request.get_json(force=True) or {}
-    dna_weights = body.get("dnaWeights") or {}
-    genre_slugs = body.get("genreSlugs") or []
-
-    if not dna_weights or not genre_slugs:
-        return jsonify({"match": 50, "label": "Uncharted"})
-
-    scores = [dna_weights[g] for g in genre_slugs if g in dna_weights]
-    if not scores:
-        return jsonify({"match": 50, "label": "Uncharted"})
-
-    pct = round(sum(scores) / len(scores))
-    pct = max(0, min(100, pct))
-
-    if   pct >= 90: label = "Perfect Match"
-    elif pct >= 75: label = "Strong Match"
-    elif pct >= 55: label = "Good Match"
-    elif pct >= 35: label = "Partial Match"
-    else:           label = "Outside DNA"
-
-    return jsonify({"match": pct, "label": label})
-
-
 # ── GET /api/games/<id>/screenshots ───────────────────────────────────────────
 @app.route("/api/games/<int:game_id>/screenshots", methods=["GET"])
 def get_screenshots(game_id: int):
     query = f"fields image_id; where game = {game_id}; limit 8;"
     try:
-        resp = requests.post(
-            f"{IGDB_BASE}/screenshots", headers=get_igdb_headers(), data=query, timeout=10
-        )
+        resp = requests.post(f"{IGDB_BASE}/screenshots", headers=get_igdb_headers(), data=query, timeout=10)
         resp.raise_for_status()
         return jsonify({
             "results": [
@@ -1288,9 +1559,7 @@ def get_screenshots(game_id: int):
 def get_stores(game_id: int):
     query = f"fields category, url; where game = {game_id} & category = (1, 5, 13, 16, 17);"
     try:
-        resp = requests.post(
-            f"{IGDB_BASE}/websites", headers=get_igdb_headers(), data=query, timeout=10
-        )
+        resp = requests.post(f"{IGDB_BASE}/websites", headers=get_igdb_headers(), data=query, timeout=10)
         resp.raise_for_status()
         cat_map = {13: 1, 16: 11, 17: 5}
         stores  = []
@@ -1312,9 +1581,7 @@ def get_stores(game_id: int):
 def get_hltb(game_id: int):
     query = f"fields genres.id; where id = {game_id};"
     try:
-        resp = requests.post(
-            f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query, timeout=8
-        )
+        resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query, timeout=8)
         if not resp.ok or not resp.json():
             return jsonify(HLTB_DEFAULT)
         genre_ids = [g.get("id") for g in resp.json()[0].get("genres", [])]
@@ -1337,10 +1604,7 @@ def get_library(user_id: str):
         return jsonify({"error": "DB unavailable"}), 503
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT * FROM user_library WHERE user_id=%s ORDER BY added_at DESC",
-                (user_id,)
-            )
+            cur.execute("SELECT * FROM user_library WHERE user_id=%s ORDER BY added_at DESC", (user_id,))
             return jsonify([dict(r) for r in cur.fetchall()])
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -1367,8 +1631,8 @@ def upsert_library(user_id: str):
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO user_library
-                        (user_id,game_id,game_name,genres,rating,status,is_liked,is_favorite,playtime)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        (user_id,game_id,game_name,genres,rating,status,is_liked,is_favorite,playtime,image_url)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (user_id,game_id) DO UPDATE SET
                         game_name   = EXCLUDED.game_name,
                         genres      = EXCLUDED.genres,
@@ -1376,13 +1640,15 @@ def upsert_library(user_id: str):
                         status      = EXCLUDED.status,
                         is_liked    = EXCLUDED.is_liked,
                         is_favorite = EXCLUDED.is_favorite,
-                        playtime    = EXCLUDED.playtime
+                        playtime    = EXCLUDED.playtime,
+                        image_url   = EXCLUDED.image_url
                 """, (
                     user_id, int(body["game_id"]), str(body.get("game_name", "")),
                     json.dumps(genres_raw if isinstance(genres_raw, list) else []),
                     float(body.get("rating", 0)), status,
+                    float(body.get("rating", 0)), status,
                     bool(body.get("is_liked", False)), bool(body.get("is_favorite", False)),
-                    playtime,
+                    playtime, str(body.get("image_url", "")),
                 ))
         return jsonify({"ok": True, "persisted": True})
     except Exception as exc:
@@ -1422,6 +1688,32 @@ def recommend():
         "mode":  "svm" if ranked else "cold_start",
         "games": ranked if ranked else sorted(games, key=lambda g: g.get("rating", 0), reverse=True),
     })
+
+
+# ── POST /api/games/<id>/dna-match ────────────────────────────────────────────
+@app.route("/api/games/<int:game_id>/dna-match", methods=["POST"])
+def dna_match(game_id: int):
+    body        = request.get_json(force=True) or {}
+    dna_weights = body.get("dnaWeights") or {}
+    genre_slugs = body.get("genreSlugs") or []
+
+    if not dna_weights or not genre_slugs:
+        return jsonify({"match": 50, "label": "Uncharted"})
+
+    scores = [dna_weights[g] for g in genre_slugs if g in dna_weights]
+    if not scores:
+        return jsonify({"match": 50, "label": "Uncharted"})
+
+    pct = round(sum(scores) / len(scores))
+    pct = max(0, min(100, pct))
+
+    if   pct >= 90: label = "Perfect Match"
+    elif pct >= 75: label = "Strong Match"
+    elif pct >= 55: label = "Good Match"
+    elif pct >= 35: label = "Partial Match"
+    else:           label = "Outside DNA"
+
+    return jsonify({"match": pct, "label": label})
 
 
 if __name__ == "__main__":

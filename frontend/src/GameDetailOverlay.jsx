@@ -20,8 +20,8 @@ import {
 } from "lucide-react";
 import {
   API_BASE, truncate, ratingColor, isNewRelease,
-  persistLibraryItem, MOCK_USER_ID,
 } from "./shared.js";
+import { persistLibraryItemFS } from "./firebaseLibrary.js";
 
 /* ── Skeleton block ──────────────────────────────────────────────────────────── */
 function Skeleton({ width = "100%", height = 16, radius = 6, className = "" }) {
@@ -125,6 +125,7 @@ const GameDetailOverlay = memo(function GameDetailOverlay({
   dispatch,
   addToast,
   onClose,
+  user,
 }) {
   /* --- Immediately available from the card --- */
   const [detailGame,   setDetailGame]   = useState(cardGame ?? null);
@@ -200,7 +201,7 @@ const GameDetailOverlay = memo(function GameDetailOverlay({
     background_image: g.background_image ?? null,
   });
 
-  const persist = (g, e) => persistLibraryItem(MOCK_USER_ID, {
+  const persist = (g, e) => persistLibraryItemFS(user?.uid, {
     game_id: g.id, game_name: g.name,
     genres: g.genre_slugs ?? [], rating: g.rating ?? 0,
     status: e.status ?? null, is_liked: e.isLiked ?? false, is_favorite: e.isFavorite ?? false,

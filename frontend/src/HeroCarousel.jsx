@@ -130,7 +130,7 @@ export default function HeroCarousel({ onCardClick, onColorChange }) {
             </div>
             <h2 className="hero-title">{game.name}</h2>
             <div className="hero-meta">
-              {game.genres?.slice(0, 3).map((g) => <span key={g} className="hero-genre-chip">{g}</span>)}
+              {game.tags?.slice(0, 3).map((g) => <span key={g} className="hero-genre-chip">{g}</span>)}
               <span className="hero-rating" style={{ color: ratingColor(game.rating) }}>
                 <Star size={13} fill="currentColor" />{game.rating?.toFixed(1)}
               </span>

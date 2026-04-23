@@ -1,2 +1,30 @@
-/Backend/venv/
-/Backend/.env
+# Environment and sensitive files
+.env
+*.env
+serviceAccountKey.json
+Backend/serviceAccountKey.json
+
+# Python
+venv/
+Backend/venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+dist-ssr/
+*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
