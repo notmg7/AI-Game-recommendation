@@ -2419,12 +2419,13 @@ function Dashboard({
   /* Infinite scroll */
   useEffect(() => {
     if (view !== "dashboard") return; // Hibernate observer if not on dashboard
-    
+
     const s = sentinelRef.current, r = scrollRef.current;
     if (!s || !r) return;
 
     const obs = new IntersectionObserver(
       ([e]) => {
+        if (view !== "dashboard") return;
         // Final guard: check if the component is still the active view
         if (e.isIntersecting && view === "dashboard" && hasMore && !loading && !loadingMore) {
           loadMore();
@@ -2999,21 +3000,15 @@ export default function App() {
 
   /* Navigation Guard & Scroll Reset on View Transitions */
   useEffect(() => {
-    // 1. Reset Internal Containers instead of just the window
-    const resetScroll = () => {
-      const containers = document.querySelectorAll('.main-content, .full-page-scroll');
-      containers.forEach(el => el.scrollTo({ top: 0, behavior: 'instant' }));
-    };
+    // 1. Force-reset all possible internal scroll containers
+    const containers = document.querySelectorAll('.main-content, .full-page-scroll, .library-main');
+    containers.forEach(el => {
+      el.scrollTo({ top: 0, behavior: 'instant' });
+    });
 
-    // Run once immediately and again after a short timeout to catch late renders
-    resetScroll();
-    const timer = setTimeout(resetScroll, 100);
-
-    // 2. Clear state locks
+    // 2. Clear lingering state
     setOverlayGame(null);
     handleClearSearch();
-
-    return () => clearTimeout(timer);
   }, [view]);
 
   useEffect(() => {

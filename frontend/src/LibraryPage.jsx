@@ -31,7 +31,7 @@
  */
 
 import {
-  useState, useEffect, useMemo, useCallback, useRef, memo,
+  useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, memo,
 } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -426,6 +426,12 @@ export default function LibraryPage({
   const [yearFilter, setYearFilter] = useState("all");
   const yearRefs = useRef({});
   const mainRef = useRef(null);   /* scrollable .library-main element */
+
+  useLayoutEffect(() => {
+    if (mainRef.current) {
+      mainRef.current.scrollTo(0, 0);
+    }
+  }, []);
 
   const level = getLevel(xp);
   const title = getTitle(level);
