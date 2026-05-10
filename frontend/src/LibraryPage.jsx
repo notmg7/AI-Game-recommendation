@@ -78,8 +78,8 @@ function groupEntriesByYear(entries) {
       const topHits = sorted.slice(0, 4);
 
       // 3. THE CRITICAL FIX: Ensure ID comparison is type-agnostic (force to String)
-      const topIds = new Set(topHits.map(e => String(e.game.id)));
-      const rest = list.filter(e => !topIds.has(String(e.game.id)));
+      const topIds = new Set(topHits.map(e => String(e.game?.id || '')));
+      const rest = list.filter(e => !topIds.has(String(e.game?.id || '')));
 
       // 4. Sort the 'rest' by rating as well
       rest.sort((a, b) => (b.game?.rating ?? 0) - (a.game?.rating ?? 0));
@@ -123,7 +123,10 @@ function StatCard({ icon: Icon, label, value, accent }) {
 const LibGameCard = memo(function LibGameCard({
   entry, activeTab, onRemove, onFavorite, onAddHours, onSetHours, onFinish, onOpenOverlay,
 }) {
-  const { game, status, isFavorite, playtime = 0 } = entry;
+  const game = entry?.game;
+  const status = entry?.status;
+  const isFavorite = entry?.isFavorite;
+  const playtime = entry?.playtime ?? 0;
   const showFavBtn = activeTab === "liked" || activeTab === "favorites";
 
   // Panel state
@@ -167,10 +170,10 @@ const LibGameCard = memo(function LibGameCard({
       <div
         className="lib-card-image"
         style={{ cursor: "pointer" }}
-        onClick={() => onOpenOverlay?.({ id: game.id, name: game.name, background_image: game.background_image })}
+        onClick={() => onOpenOverlay?.({ id: game?.id, name: game?.name, background_image: game?.background_image })}
       >
-        {game.background_image
-          ? <img src={game.background_image} alt={game.name} loading="lazy" />
+        {game?.background_image
+          ? <img src={game.background_image} alt={game?.name || "Game cover"} loading="lazy" />
           : <div className="lib-card-image--fallback"><Gamepad2 size={28} opacity={0.3} /></div>
         }
         <div className="lib-card-image-overlay" />
@@ -190,22 +193,22 @@ const LibGameCard = memo(function LibGameCard({
       <div className="lib-card-body">
         <h3
           className="lib-card-title"
-          onClick={() => onOpenOverlay?.({ id: game.id, name: game.name, background_image: game.background_image })}
+          onClick={() => onOpenOverlay?.({ id: game?.id, name: game?.name, background_image: game?.background_image })}
           style={{ cursor: "pointer" }}
         >
-          {truncate(game.name, 30)}
+          {truncate(game?.name || "", 30)}
         </h3>
         <div className="lib-card-meta">
-          {game.rating != null && (
+          {game?.rating != null && (
             <span className="lib-card-rating" style={{ color: ratingColor(game.rating) }}>
               <Star size={10} fill="currentColor" />{Number(game.rating).toFixed(1)}
             </span>
           )}
-          {game.genre_slugs?.slice(0, 2).map(s => (
+          {game?.genre_slugs?.slice(0, 2).map(s => (
             <span key={s} className="lib-card-genre">{s}</span>
           ))}
         </div>
-        {game.released && (
+        {game?.released && (
           <p className="lib-card-released">{game.released}</p>
         )}
 
@@ -309,7 +312,7 @@ const LibGameCard = memo(function LibGameCard({
             <Star size={13} fill={isFavorite ? "currentColor" : "none"} />
           </button>
         )}
-        <button className="lib-card-btn lib-card-btn--remove" onClick={() => onRemove(game.id)}>
+        <button className="lib-card-btn lib-card-btn--remove" onClick={() => onRemove(game?.id)}>
           <Trash2 size={13} />
         </button>
       </div>
@@ -364,8 +367,8 @@ function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAdd
               </div>
               <motion.div className="lib-game-grid" layout>
                 <AnimatePresence mode="popLayout">
-                  {topHits.map(entry => (
-                    <LibGameCard key={entry.game.id} entry={entry} activeTab={activeTab}
+                  {topHits.map((entry, index) => (
+                    <LibGameCard key={entry.game?.id || entry.id || index} entry={entry} activeTab={activeTab}
                       onRemove={onRemove} onFavorite={onFavorite}
                       onAddHours={onAddHours} onSetHours={onSetHours}
                       onFinish={onFinish} onOpenOverlay={onOpenOverlay}
@@ -385,8 +388,8 @@ function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAdd
               )}
               <motion.div className="lib-game-grid" layout>
                 <AnimatePresence mode="popLayout">
-                  {rest.map(entry => (
-                    <LibGameCard key={entry.game.id} entry={entry} activeTab={activeTab}
+                  {rest.map((entry, index) => (
+                    <LibGameCard key={entry.game?.id || entry.id || index} entry={entry} activeTab={activeTab}
                       onRemove={onRemove} onFavorite={onFavorite}
                       onAddHours={onAddHours} onSetHours={onSetHours}
                       onFinish={onFinish} onOpenOverlay={onOpenOverlay}
@@ -455,8 +458,8 @@ export default function LibraryPage({
     const q = tabSearch[effectiveTab].toLowerCase().trim();
     if (!q) return yearFilteredItems;
     return yearFilteredItems.filter(e =>
-      e.game.name?.toLowerCase().includes(q) ||
-      e.game.genre_slugs?.some(s => s.includes(q))
+      e.game?.name?.toLowerCase().includes(q) ||
+      e.game?.genre_slugs?.some(s => s.includes(q))
     );
   }, [yearFilteredItems, effectiveTab, tabSearch]);
 
@@ -472,12 +475,12 @@ export default function LibraryPage({
 
   /* Stats */
   const totalSaved = new Set([
-    ...tabItems.wishlist.map(e => e.game.id),
-    ...tabItems.played.map(e => e.game.id),
-    ...tabItems.playing.map(e => e.game.id),
+    ...tabItems.wishlist.map(e => e.game?.id).filter(Boolean),
+    ...tabItems.played.map(e => e.game?.id).filter(Boolean),
+    ...tabItems.playing.map(e => e.game?.id).filter(Boolean),
   ]).size;
   const avgRating = entries.length
-    ? (entries.reduce((s, e) => s + (e.game.rating ?? 0), 0) / entries.length).toFixed(1)
+    ? (entries.reduce((s, e) => s + (e.game?.rating ?? 0), 0) / entries.length).toFixed(1)
     : "—";
   const totalHours = entries.reduce((s, e) => s + (e.playtime ?? 0), 0).toFixed(1);
 
@@ -877,9 +880,9 @@ export default function LibraryPage({
                   /* Flat grid when search/year-filter is active */
                   <motion.div className="lib-game-grid" layout>
                     <AnimatePresence mode="popLayout">
-                      {visibleItems.map(entry => (
+                      {visibleItems.map((entry, index) => (
                         <LibGameCard
-                          key={entry.game.id}
+                          key={entry.game?.id || entry.id || index}
                           entry={entry}
                           activeTab={effectiveTab}
                           onRemove={handleRemove}

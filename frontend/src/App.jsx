@@ -2418,27 +2418,23 @@ function Dashboard({
 
   /* Infinite scroll */
   useEffect(() => {
-    if (view !== "dashboard") return;
+    if (view !== "dashboard") return; // Hibernate observer if not on dashboard
+    
     const s = sentinelRef.current, r = scrollRef.current;
     if (!s || !r) return;
+
     const obs = new IntersectionObserver(
       ([e]) => {
-        if (e.isIntersecting && hasMore && !loading && !loadingMore) {
-          if (isDiscovery) {
-            if (JSON.stringify(dnaWeights) !== JSON.stringify(appliedDnaWeights)) {
-              setSyncPulse(true);
-              setTimeout(() => setSyncPulse(false), 2500);
-              setAppliedDnaWeights(dnaWeights);
-            }
-          }
+        // Final guard: check if the component is still the active view
+        if (e.isIntersecting && view === "dashboard" && hasMore && !loading && !loadingMore) {
           loadMore();
         }
       },
-      { root: r, rootMargin: "0px 0px 140px 0px", threshold: 0 }
+      { root: r, rootMargin: "0px 0px 400px 0px", threshold: 0 }
     );
     obs.observe(s);
     return () => obs.disconnect();
-  }, [view, hasMore, loading, loadingMore, loadMore, isDiscovery, dnaWeights, appliedDnaWeights]);
+  }, [view, hasMore, loading, loadingMore, loadMore]);
 
   /* "/" shortcut */
   useEffect(() => {
@@ -3001,15 +2997,22 @@ export default function App() {
     });
   }, [addToast, playChime]);
 
-  /* Reset scroll position of any view on navigation transition */
+  /* Navigation Guard & Scroll Reset on View Transitions */
   useEffect(() => {
-    window.scrollTo({ top: 0, behavior: "instant" });
-    // Delayed call to ensure DOM has rendered new layout structures completely
-    const timer = setTimeout(() => {
-      document.querySelectorAll(".full-page-scroll, .main-content").forEach(el => {
-        el.scrollTo({ top: 0, behavior: "instant" });
-      });
-    }, 50);
+    // 1. Reset Internal Containers instead of just the window
+    const resetScroll = () => {
+      const containers = document.querySelectorAll('.main-content, .full-page-scroll');
+      containers.forEach(el => el.scrollTo({ top: 0, behavior: 'instant' }));
+    };
+
+    // Run once immediately and again after a short timeout to catch late renders
+    resetScroll();
+    const timer = setTimeout(resetScroll, 100);
+
+    // 2. Clear state locks
+    setOverlayGame(null);
+    handleClearSearch();
+
     return () => clearTimeout(timer);
   }, [view]);
 
@@ -3047,7 +3050,7 @@ export default function App() {
   const handleToggleMute = useCallback(() => setMuted(v => { if (!v) playSad?.(); return !v; }), [playSad]);
   const handleSiteTintChange = useCallback(t => setSiteTint(t), []);
   const handleSearch = e => { e?.preventDefault(); setSearchQuery(searchInput.trim()); };
-  const handleClearSearch = () => { setSearchInput(""); setSearchQuery(""); };
+  function handleClearSearch() { setSearchInput(""); setSearchQuery(""); }
 
   const handleEnter = async (action, email, password, extra) => {
     try {
