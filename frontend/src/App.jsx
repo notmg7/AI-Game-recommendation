@@ -40,7 +40,7 @@ import {
   Monitor, ShoppingCart, Tag, LayoutGrid, Layers,
   Users, Building2, Calendar, Trophy,
   ExternalLink, ChevronUp, Image as ImageIcon,
-  Eye, EyeOff,
+  Eye, EyeOff, BookOpen,
 } from "lucide-react";
 import useSound from "use-sound";
 
@@ -148,204 +148,232 @@ function sectionToApiParams(section) {
   return { ordering: "", metacritic: "" };
 }
 
+/* ── formatNumber ───────────────────────────────────────────────────────────── */
+function formatNumber(num) {
+  if (!num) return "0";
+  if (num >= 1000) {
+    return (num / 1000).toFixed(1) + "k";
+  }
+  return num.toString();
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
-   GAME DETAIL MODAL  V14 "Marketplace Edition"
-   ════════════════════════════════════════════════════════════════════════════
-   • Hero banner locked to 16:9 with gradient overlay
-   • Two-column body: left = media + description, right = metadata sidebar
-   • CompatibilityMeter — DNA match progress bar
-   • HltbBoxes — 3 playtime estimate cards
-   • TechGrid — PC specs (OS, RAM, Storage, GPU)
-   • "View on Steam" button with official Steam blue
-   • All data hydrated from the upgraded /api/games/<id> endpoint
+   GAME DETAIL MODAL  V15 "Pro-Tier Marketplace"
    ════════════════════════════════════════════════════════════════════════════ */
 
-/* ── Sub-components ───────────────────────────────────────────────────────── */
-function CompatibilityMeter({ match, label, loading }) {
+/* ════════════════════════════════════════════════════════════════════════════
+   GAME DETAIL MODAL  V16 "Immersive Bento" — Sub-components
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Animated Score Ring ── */
+function ScoreRing({ value, max = 10, label, count, color, size = 72 }) {
+  const pct = Math.min(value / max, 1);
+  const r = (size - 10) / 2;
+  const circ = 2 * Math.PI * r;
+  const dash = circ * pct;
+  if (!value || value <= 0) return null;
+  return (
+    <div className="gdm-score-container">
+      <div className="gdm-score-label-above">{label}</div>
+      <div className="gdm-score-ring" style={{ width: size, height: size }}>
+        <svg width={size} height={size} style={{ transform: "rotate(-90deg)", position: "absolute", inset: 0 }}>
+          <circle cx={size / 2} cy={size / 2} r={r} fill="none"
+            stroke="rgba(255,255,255,0.05)" strokeWidth={6} />
+          <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={6}
+            strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
+            style={{ filter: `drop-shadow(0 0 6px ${color}88)` }} />
+        </svg>
+        <div className="gdm-score-inner">
+          <span className="gdm-score-val" style={{ color, fontWeight: "900" }}>{value.toFixed(1)}</span>
+        </div>
+      </div>
+      {count > 0 && (
+        <div className="gdm-score-count-below">
+          {formatNumber(count)} reviews
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── DNA Progress Ring ── */
+function DnaProgressRing({ match, label, loading, size = 96 }) {
   const color =
     match >= 90 ? "var(--accent-green)" :
       match >= 75 ? "var(--accent)" :
         match >= 55 ? "var(--accent-violet)" :
           match >= 35 ? "var(--accent-amber)" : "var(--text-muted)";
 
+  const r = (size - 12) / 2;
+  const circ = 2 * Math.PI * r;
+  const dash = circ * (match / 100);
+
   if (loading) {
     return (
-      <div className="gdm-compat">
-        <div className="gdm-compat-header">
-          <span className="gdm-compat-label">DNA COMPATIBILITY</span>
-          <div className="gdm-compat-pct-skel" />
+      <div className="gdm-dna-ring-wrap">
+        <div className="gdm-dna-ring-skel" style={{ width: size, height: size }} />
+        <div className="gdm-dna-ring-info">
+          <div className="gdm-compat-pct-skel" style={{ width: 56, height: 18 }} />
+          <div className="gdm-compat-pct-skel" style={{ width: 80, height: 12, marginTop: 4 }} />
         </div>
-        <div className="gdm-compat-track"><div className="gdm-compat-fill-skel" /></div>
       </div>
     );
   }
 
   return (
-    <div className="gdm-compat">
-      <div className="gdm-compat-header">
-        <span className="gdm-compat-label">DNA COMPATIBILITY</span>
-        <span className="gdm-compat-pct" style={{ color }}>{match}%</span>
+    <div className="gdm-dna-ring-wrap">
+      <div className="gdm-dna-ring" style={{ width: size, height: size }}>
+        <svg width={size} height={size} style={{ transform: "rotate(-90deg)", position: "absolute", inset: 0 }}>
+          <circle cx={size / 2} cy={size / 2} r={r} fill="none"
+            stroke="rgba(255,255,255,0.05)" strokeWidth={8} />
+          <motion.circle cx={size / 2} cy={size / 2} r={r} fill="none"
+            stroke={color} strokeWidth={8} strokeLinecap="round"
+            strokeDasharray={`${circ}`}
+            initial={{ strokeDashoffset: circ }}
+            animate={{ strokeDashoffset: circ - dash }}
+            transition={{ duration: 0.9, ease: [0.16, 1, 0.3, 1], delay: 0.15 }}
+            style={{ filter: `drop-shadow(0 0 8px ${color}99)` }} />
+        </svg>
+        <div className="gdm-dna-ring-inner">
+          <span className="gdm-dna-ring-pct" style={{ color }}>{match}%</span>
+        </div>
       </div>
-      <div className="gdm-compat-track">
-        <motion.div
-          className="gdm-compat-fill"
-          style={{ background: color }}
-          initial={{ width: 0 }}
-          animate={{ width: `${match}%` }}
-          transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1], delay: 0.1 }}
-        />
+      <div className="gdm-dna-ring-info">
+        <span className="gdm-dna-ring-label">DNA MATCH</span>
+        <span className="gdm-compat-badge" style={{ color, borderColor: color + "44" }}>{label}</span>
       </div>
-      <span className="gdm-compat-badge" style={{ color, borderColor: color + "44" }}>
-        {label}
-      </span>
     </div>
   );
 }
 
-function HltbBoxes({ hltb }) {
-  if (!hltb) return null;
-  const boxes = [
-    { label: "Main Story", value: hltb.main_story, icon: "🎯", cls: "" },
-    { label: "Completionist", value: hltb.completionist, icon: "🏆", cls: "gdm-hltb-box--gold" },
-    { label: "Source", value: hltb.source === "genre-estimate" ? "Est." : "HLTB", icon: "📊", cls: "gdm-hltb-box--dim" },
-  ];
+/* ── Bento Chips tile — hidden if no items ── */
+function BentoChips({ label, items, icon, accentClass }) {
+  if (!items?.length) return null;
   return (
-    <div className="gdm-hltb">
-      <span className="gdm-sidebar-label">HOW LONG TO BEAT</span>
-      <div className="gdm-hltb-row">
-        {boxes.map(b => (
-          <div key={b.label} className={`gdm-hltb-box ${b.cls}`}>
-            <span className="gdm-hltb-icon">{b.icon}</span>
-            <span className="gdm-hltb-val">
-              {b.label === "Source" ? b.value : b.value != null ? `${b.value}h` : "—"}
-            </span>
-            <span className="gdm-hltb-key">{b.label}</span>
-          </div>
-        ))}
+    <div className={`gdm-bento-cell ${accentClass ?? ""}`}>
+      <span className="gdm-bento-label">{icon} {label}</span>
+      <div className="gdm-bento-chips">
+        {items.map(i => <span key={i} className="gdm-bento-chip">{i}</span>)}
       </div>
     </div>
   );
 }
 
-function TechGrid({ pcReqs, developer, esrb, platforms }) {
-  /* Parse out key specs from the Steam HTML-stripped text blob */
-  const parse = (text, key) => {
-    if (!text) return null;
-    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
-    for (const line of lines) {
-      if (line.toLowerCase().includes(key.toLowerCase())) {
-        const colon = line.indexOf(":");
-        if (colon !== -1) return line.slice(colon + 1).trim().slice(0, 60);
-      }
-    }
-    return null;
-  };
-
-  const minText = pcReqs?.minimum || "";
-  const rows = [
-    { icon: "🖥", label: "OS", value: parse(minText, "OS") || (platforms?.includes("PC (Microsoft Windows)") ? "Windows" : "—") },
-    { icon: "💾", label: "Storage", value: parse(minText, "Storage") || parse(minText, "HDD") || "—" },
-    { icon: "🧠", label: "RAM", value: parse(minText, "Memory") || parse(minText, "RAM") || "—" },
-    { icon: "⚙️", label: "GPU", value: parse(minText, "Graphics") || "—" },
-    { icon: "🏢", label: "Dev", value: developer?.[0] || "—" },
-    { icon: "🔞", label: "Rating", value: esrb || "Not Rated" },
-  ];
-
-  const hasAnySpec = rows.some(r => r.value !== "—");
-  if (!hasAnySpec) return null;
-
-  return (
-    <div className="gdm-techgrid">
-      <span className="gdm-sidebar-label">TECH SPECS</span>
-      <div className="gdm-techgrid-rows">
-        {rows.map(r => (
-          <div key={r.label} className="gdm-techgrid-row">
-            <span className="gdm-techgrid-icon">{r.icon}</span>
-            <span className="gdm-techgrid-key">{r.label}</span>
-            <span className="gdm-techgrid-val" title={r.value}>{r.value}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
+/* ════════════════════════════════════════════════════════════════════════════
+   GAME DETAIL MODAL  V16 "Immersive Bento"
+   ════════════════════════════════════════════════════════════════════════════ */
 function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose, dnaWeights, user }) {
+  const [activeGame, setActiveGame] = useState(cardGame);
   const [fullGame, setFullGame] = useState(null);
   const [screenshots, setScreenshots] = useState([]);
   const [activeImg, setActiveImg] = useState(0);
   const [dataLoading, setDataLoading] = useState(true);
-  const [imgLoading, setImgLoading] = useState(true);
-  const [dnaMatch, setDnaMatch] = useState(null);   // { match, label }
-  const [dnaLoading, setDnaLoading] = useState(true);
+  const [dnaMatch, setDnaMatch] = useState(null);
+  const [hltb, setHltb] = useState(null);
+  const [isDataReady, setIsDataReady] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [isSecondaryDataLoading, setIsSecondaryDataLoading] = useState(true);
 
-  /* Use hydrated data when available, card data instantly for title/hero */
-  const game = fullGame ?? cardGame;
+  useEffect(() => {
+    setIsDataReady(false);
+    setIsExpanded(false);
+    setIsSecondaryDataLoading(true);
+  }, [activeGame?.id]);
 
+  useEffect(() => {
+    if (!dataLoading) {
+      setIsDataReady(true);
+    }
+  }, [dataLoading]);
+
+  const game = fullGame ?? activeGame;
   const entry = library?.get(game?.id);
   const status = entry?.status;
   const isLiked = entry?.isLiked ?? false;
   const isFavorite = entry?.isFavorite ?? false;
 
-  /* ESC to close */
+  useEffect(() => {
+    setActiveGame(cardGame);
+    setFullGame(null);
+    setScreenshots([]);
+    setActiveImg(0);
+    setHltb(null);
+
+    // Initial DNA Match calculation for instant 0ms build-in!
+    const slugs = cardGame?.genre_slugs;
+    if (slugs?.length && dnaWeights) {
+      const scores = slugs.map(g => dnaWeights[g]).filter(v => v !== undefined);
+      if (scores.length > 0) {
+        const pct = Math.max(0, Math.min(100, Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)));
+        let label = "Outside DNA";
+        if (pct >= 90) label = "Perfect Match";
+        else if (pct >= 75) label = "Strong Match";
+        else if (pct >= 55) label = "Good Match";
+        else if (pct >= 35) label = "Partial Match";
+        setDnaMatch({ match: pct, label });
+      } else {
+        setDnaMatch({ match: 50, label: "Uncharted" });
+      }
+    } else {
+      setDnaMatch({ match: 50, label: "Uncharted" });
+    }
+  }, [cardGame, dnaWeights]);
+
   useEffect(() => {
     const h = e => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
-  /* Lock body scroll */
   useEffect(() => {
     document.body.style.overflow = "hidden";
     return () => { document.body.style.overflow = ""; };
   }, []);
 
-  /* Async: full game detail (hydrates hltb, steam_url, esrb, pc_requirements) */
   useEffect(() => {
-    if (!cardGame?.id) return;
+    if (!activeGame?.id) return;
     let cancelled = false;
     setDataLoading(true);
-    fetch(`${API_BASE}/games/${cardGame.id}`)
+    setIsSecondaryDataLoading(true);
+    fetch(`${API_BASE}/games/${activeGame.id}`)
       .then(r => r.ok ? r.json() : null)
-      .then(d => { if (!cancelled && d) setFullGame(d); })
-      .catch(() => { })
-      .finally(() => { if (!cancelled) setDataLoading(false); });
-    return () => { cancelled = true; };
-  }, [cardGame?.id]);
-
-  /* Async: screenshots */
-  useEffect(() => {
-    if (!cardGame?.id) return;
-    let cancelled = false;
-    fetch(`${API_BASE}/games/${cardGame.id}/screenshots`)
-      .then(r => r.ok ? r.json() : { results: [] })
       .then(d => {
-        if (!cancelled) {
-          const imgs = (d.results ?? []).slice(0, 8).map(s => s.image).filter(Boolean);
-          setScreenshots(imgs);
-          setImgLoading(false);
+        if (!cancelled && d) {
+          setFullGame(d);
+          // Set screenshots instantly from the unified response!
+          setScreenshots((d.screenshots ?? []).slice(0, 8).map(s => s.image).filter(Boolean));
+          // Set HLTB instantly from the unified response!
+          setHltb(d.hltb);
+
+          // Calculate DNA Match instantly client-side!
+          const slugs = d.genre_slugs;
+          if (slugs?.length && dnaWeights) {
+            const scores = slugs.map(g => dnaWeights[g]).filter(v => v !== undefined);
+            if (scores.length > 0) {
+              const pct = Math.max(0, Math.min(100, Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)));
+              let label = "Outside DNA";
+              if (pct >= 90) label = "Perfect Match";
+              else if (pct >= 75) label = "Strong Match";
+              else if (pct >= 55) label = "Good Match";
+              else if (pct >= 35) label = "Partial Match";
+              setDnaMatch({ match: pct, label });
+            } else {
+              setDnaMatch({ match: 50, label: "Uncharted" });
+            }
+          } else {
+            setDnaMatch({ match: 50, label: "Uncharted" });
+          }
         }
       })
-      .catch(() => { if (!cancelled) setImgLoading(false); });
-    return () => { cancelled = true; };
-  }, [cardGame?.id]);
-
-  /* Async: DNA match — fires once we have genre_slugs */
-  useEffect(() => {
-    const slugs = game?.genre_slugs;
-    if (!slugs?.length || !dnaWeights) { setDnaLoading(false); return; }
-    let cancelled = false;
-    fetch(`${API_BASE}/games/${game.id}/dna-match`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dnaWeights, genreSlugs: slugs }),
-    })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (!cancelled && d) setDnaMatch(d); })
       .catch(() => { })
-      .finally(() => { if (!cancelled) setDnaLoading(false); });
+      .finally(() => {
+        if (!cancelled) {
+          setDataLoading(false);
+          setIsSecondaryDataLoading(false);
+        }
+      });
     return () => { cancelled = true; };
-  }, [game?.genre_slugs, dnaWeights]);
+  }, [activeGame?.id, dnaWeights]);
 
   const handleLibraryAction = useCallback((action) => {
     if (!game) return;
@@ -355,10 +383,8 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
     persistLibraryItemFS(user.uid, {
       game_id: game.id, game_name: game.name,
       genres: game.genre_slugs ?? [], rating: game.rating ?? 0,
-      status: newStatus,
-      is_liked: current?.isLiked ?? false,
-      is_favorite: current?.isFavorite ?? false,
-      image_url: game.background_image,
+      status: newStatus, is_liked: current?.isLiked ?? false,
+      is_favorite: current?.isFavorite ?? false, image_url: game.background_image,
     });
     if (newStatus === "playing") addToast(`🎮 Now playing: ${truncate(game.name, 18)}`, "playing");
     if (newStatus === "wishlist") addToast("Added to Wishlist!", "wishlist");
@@ -366,73 +392,82 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
     if (!newStatus) addToast("Removed from library", "info");
   }, [game, library, dispatch, addToast]);
 
-  const allImages = [
-    ...(game?.background_image ? [game.background_image] : []),
-    ...screenshots,
-  ];
+  const allImages = screenshots.length > 0 ? screenshots : (game?.background_image ? [game.background_image] : []);
 
   if (!game) return null;
 
+  const userRating = fullGame?.rating ?? 0;
+  const criticRating = fullGame?.critic_rating ?? 0;
+  const userCount = fullGame?.rating_count ?? 0;
+  const criticCount = fullGame?.critic_rating_count ?? 0;
+  const hasRatings = !!fullGame && (userRating > 0 || criticRating > 0);
+
+  const hasModes = (game.game_modes?.length ?? 0) > 0;
+  const hasPerspectives = (game.player_perspectives?.length ?? 0) > 0;
+  const hasKeywords = (game.keywords?.length ?? 0) > 0;
+  const hasPlatforms = (game.platforms?.length ?? 0) > 0;
+  const hasSteam = typeof game.steam_url === "string" && game.steam_url.length > 0;
+  const hasTrailer = !!(game.trailer_url || game.clip?.clip);
+  const hasPublishers = (game.publishers?.length ?? 0) > 0;
+  const hasTags = (game.tags?.length ?? 0) > 0;
+
+  const storyText = game?.storyline || game?.summary || game?.description_raw;
+
   const modalContent = (
-    <motion.div
-      className="gdm-backdrop"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.2 }}
-      onClick={onClose}
-    >
-      <motion.div
-        className="gdm-panel"
+    <motion.div className="gdm-backdrop"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }} transition={{ duration: 0.22 }}
+      onClick={onClose}>
+
+      <motion.div className="gdm-panel"
         initial={{ opacity: 0, y: 32, scale: 0.96 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 24, scale: 0.97 }}
-        transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
-        onClick={e => e.stopPropagation()}
-      >
-        {/* ── Hero Banner (16:9, gradient overlay, title inside) ── */}
-        <div className="gdm-header">
-          <div className="gdm-hero-wrap">
-            {game.background_image && (
-              <img src={game.background_image} alt={game.name} className="gdm-hero-img" />
+        exit={{ opacity: 0, y: 20, scale: 0.98 }}
+        transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+        onClick={e => e.stopPropagation()}>
+
+        {/* Subtle blurred cover backdrop for immersive premium visual theme */}
+        {game?.background_image && (
+          <div className="gdm-panel-bg" style={{ backgroundImage: `url(${game.background_image})` }} />
+        )}
+        <div className="gdm-panel-veil" />
+
+        {/* ════ HEADER ════ */}
+        <div className="gdm-header gdm-animate-build gdm-delay-instant" style={{ zIndex: 10 }}>
+          <div className="gdm-header-content">
+            {game.developers?.length > 0 && (
+              <span className="gdm-header-dev">{game.developers[0]}</span>
             )}
-            <div className="gdm-hero-overlay" />
-            <div className="gdm-hero-content">
-              <h2 className="gdm-title">{game.name}</h2>
-              <div className="gdm-meta-row">
-                {game.rating != null && (
-                  <span className="gdm-rating" style={{ color: ratingColor(game.rating) }}>
-                    <Star size={13} fill="currentColor" /> {game.rating.toFixed(1)}
-                  </span>
-                )}
-                {game.released && (
-                  <span className="gdm-released">
-                    <Calendar size={12} /> {new Date(game.released).getFullYear()}
-                  </span>
-                )}
-                {game.tags?.slice(0, 6).map(g => (
-                  <span key={g} className="gdm-genre-tag">{g}</span>
-                ))}
-                {game.esrb_rating && game.esrb_rating !== "Not Rated" && (
-                  <span className="gdm-esrb-chip">{game.esrb_rating}</span>
-                )}
-              </div>
+            <h2 className="gdm-header-title">{game.name}</h2>
+            <div className="gdm-header-meta">
+              {(game.released_formatted || game.released) && (
+                <span className="gdm-meta-chip">
+                  <Calendar size={11} /> {game.released_formatted || game.released}
+                </span>
+              )}
+              {game.esrb_rating && (
+                <span className="gdm-meta-chip gdm-meta-chip--esrb">{game.esrb_rating}</span>
+              )}
+              {game.genres?.slice(0, 3).map(g => (
+                <span key={g} className="gdm-meta-chip gdm-meta-chip--genre">{g}</span>
+              ))}
             </div>
           </div>
+
           <button className="gdm-close-btn" onClick={onClose} aria-label="Close">
             <X size={16} />
           </button>
         </div>
 
-        {/* ── Two-column body ── */}
-        <div className="gdm-body">
+        {/* ════ BODY ════ */}
+        <div className="gdm-body" style={{ zIndex: 5 }}>
 
-          {/* LEFT: Media + Description */}
+          {/* ── LEFT COLUMN ── */}
           <div className="gdm-col-left">
 
-            {/* Gallery */}
-            <div className="gdm-gallery-section">
-              {imgLoading ? (
+            {/* Main gallery viewer */}
+            <div className="gdm-gallery-section gdm-animate-build gdm-delay-instant">
+              {!isDataReady ? (
                 <div className="gdm-gallery-skeleton">
                   <div className="gdm-skel-main" />
                   <div className="gdm-skel-thumbs">
@@ -441,106 +476,413 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
                 </div>
               ) : allImages.length > 0 ? (
                 <div className="gdm-gallery">
-                  <AnimatePresence mode="wait">
-                    <motion.img
-                      key={allImages[activeImg]}
-                      src={allImages[activeImg]}
-                      alt={`${game.name} screenshot ${activeImg + 1}`}
-                      className="gdm-gallery-main"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      transition={{ duration: 0.18 }}
-                    />
-                  </AnimatePresence>
+                  <div className="gdm-gallery-main-container">
+                    {/* Blurred background copy for aspect ratio blending (no letterboxing) */}
+                    <div className="gdm-gallery-main-blur" style={{ backgroundImage: `url(${allImages[activeImg]})` }} />
+                    <AnimatePresence mode="wait">
+                      <motion.img key={allImages[activeImg]} src={allImages[activeImg]}
+                        alt={`${game.name} screenshot ${activeImg + 1}`}
+                        className="gdm-gallery-main"
+                        initial={{ opacity: 0, scale: 1.02 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.2 }} />
+                    </AnimatePresence>
+                  </div>
+
+                  {/* High-res picture thumbnail strip underneath main image */}
                   {allImages.length > 1 && (
-                    <>
-                      <div className="gdm-gallery-thumbs">
-                        {allImages.map((img, i) => (
-                          <button
-                            key={i}
-                            className={`gdm-thumb-btn ${i === activeImg ? "gdm-thumb-btn--active" : ""}`}
-                            onClick={() => setActiveImg(i)}
-                          >
-                            <img src={img} alt="" />
-                          </button>
-                        ))}
-                      </div>
-                      <div className="gdm-gallery-nav">
-                        <button className="gdm-nav-btn" onClick={() => setActiveImg(i => (i - 1 + allImages.length) % allImages.length)}>
-                          <ChevronLeft size={16} />
+                    <div className="gdm-gallery-thumbs">
+                      {allImages.slice(0, 8).map((img, i) => (
+                        <button key={i}
+                          className={`gdm-gallery-thumb ${i === activeImg ? "gdm-gallery-thumb--active" : ""}`}
+                          onClick={() => setActiveImg(i)}>
+                          <img src={img} alt="" />
                         </button>
-                        <span className="gdm-nav-count">{activeImg + 1} / {allImages.length}</span>
-                        <button className="gdm-nav-btn" onClick={() => setActiveImg(i => (i + 1) % allImages.length)}>
-                          <ChevronRight size={16} />
-                        </button>
-                      </div>
-                    </>
+                      ))}
+                    </div>
+                  )}
+
+                  {allImages.length > 1 && (
+                    <div className="gdm-gallery-nav">
+                      <button className="gdm-nav-btn"
+                        onClick={() => setActiveImg(i => (i - 1 + allImages.length) % allImages.length)}>
+                        <ChevronLeft size={15} />
+                      </button>
+                      <span className="gdm-nav-count">{activeImg + 1} / {allImages.length}</span>
+                      <button className="gdm-nav-btn"
+                        onClick={() => setActiveImg(i => (i + 1) % allImages.length)}>
+                        <ChevronRight size={15} />
+                      </button>
+                    </div>
                   )}
                 </div>
               ) : (
                 <div className="gdm-no-images">
-                  <ImageIcon size={28} opacity={0.2} />
+                  <ImageIcon size={28} opacity={0.18} />
                   <span>No screenshots available</span>
                 </div>
               )}
             </div>
 
-            {/* Description */}
-            <div className="gdm-desc-section">
-              {dataLoading && !game.description_raw ? (
-                <div className="gdm-desc-skeleton">
-                  {[...Array(4)].map((_, i) => (
-                    <div key={i} className="gdm-skel-line" style={{ width: i === 3 ? "60%" : "100%" }} />
-                  ))}
+            {/* ── Center Platforms Bento Tile — hidden if empty ── */}
+            {/* ── Center Platforms Bento Tile ── */}
+            {isSecondaryDataLoading ? (
+              <div className="gdm-center-platforms-tile gdm-animate-build gdm-delay-secondary" style={{
+                marginTop: "16px",
+                marginBottom: "8px",
+                background: "rgba(255, 255, 255, 0.015)",
+                border: "1px dashed rgba(255, 255, 255, 0.06)",
+                borderRadius: "20px",
+                padding: "20px 24px",
+                boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.02)"
+              }}>
+                <span style={{
+                  fontSize: "11px",
+                  fontFamily: "var(--font-mono)",
+                  fontWeight: "900",
+                  letterSpacing: "0.15em",
+                  textTransform: "uppercase",
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px"
+                }}>
+                  <Monitor size={12} style={{ color: "var(--accent)" }} /> Supported Platforms
+                </span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "10px" }}>
+                  <div style={{ width: "80px", height: "24px", borderRadius: "12px", background: "var(--skel-base)", animation: "skel-pulse 1.5s ease-in-out infinite" }} />
+                  <div style={{ width: "100px", height: "24px", borderRadius: "12px", background: "var(--skel-base)", animation: "skel-pulse 1.5s ease-in-out infinite" }} />
+                  <div style={{ width: "70px", height: "24px", borderRadius: "12px", background: "var(--skel-base)", animation: "skel-pulse 1.5s ease-in-out infinite" }} />
                 </div>
-              ) : game.description_raw ? (
-                <p className="gdm-description">
-                  {game.description_raw.slice(0, 700)}
-                  {game.description_raw.length > 700 ? "…" : ""}
-                </p>
-              ) : (
-                <p className="gdm-no-desc">No description available.</p>
-              )}
-            </div>
-
-            {/* Tags */}
-            {game.tags?.length > 0 && (
-              <div className="gdm-tags-section">
-                <span className="gdm-section-label">TAGS</span>
-                <div className="gdm-tags">
-                  {game.tags.slice(0, 10).map(t => (
-                    <span key={t} className="gdm-tag">{t}</span>
+              </div>
+            ) : hasPlatforms ? (
+              <div className="gdm-center-platforms-tile gdm-animate-build gdm-delay-secondary" style={{
+                marginTop: "16px",
+                marginBottom: "8px",
+                background: "rgba(255, 255, 255, 0.03)",
+                border: "1px solid rgba(255, 255, 255, 0.08)",
+                borderRadius: "20px",
+                padding: "20px 24px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+                boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.02)"
+              }}>
+                <span style={{
+                  fontSize: "11px",
+                  fontFamily: "var(--font-mono)",
+                  fontWeight: "900",
+                  letterSpacing: "0.15em",
+                  textTransform: "uppercase",
+                  color: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px"
+                }}>
+                  <Monitor size={12} style={{ color: "var(--accent)" }} /> Supported Platforms
+                </span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "4px" }}>
+                  {game.platforms.slice(0, 10).map(p => (
+                    <span key={p} style={{
+                      fontSize: "12px",
+                      fontWeight: "700",
+                      padding: "6px 14px",
+                      borderRadius: "20px",
+                      background: "rgba(255, 255, 255, 0.06)",
+                      border: "1px solid rgba(255, 255, 255, 0.12)",
+                      color: "#FFFFFF",
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+                      backdropFilter: "blur(5px)"
+                    }}>
+                      {p}
+                    </span>
                   ))}
                 </div>
               </div>
+            ) : null}
+
+            {/* Description - only shown if both description_raw AND a separate storyline exist to prevent duplicated text */}
+            {isSecondaryDataLoading ? (
+              <div className="gdm-desc-skeleton gdm-animate-build gdm-delay-secondary" style={{ marginTop: "16px" }}>
+                {[...Array(3)].map((_, i) => (
+                  <div key={i} className="gdm-skel-line" style={{ width: i === 2 ? "65%" : "100%" }} />
+                ))}
+              </div>
+            ) : (game.description_raw && game.storyline && game.description_raw !== game.storyline) ? (
+              <p className="gdm-description gdm-animate-build gdm-delay-secondary">
+                {game.description_raw.slice(0, 820)}
+                {game.description_raw.length > 820 ? "…" : ""}
+              </p>
+            ) : null}
+
+            {/* Story Section */}
+            {isSecondaryDataLoading ? (
+              <div className="gdm-story-section gdm-animate-build gdm-delay-final" style={{ background: "rgba(255, 255, 255, 0.015)", border: "1px dashed rgba(255, 255, 255, 0.06)" }}>
+                <h4 className="gdm-section-title">
+                  <BookOpen size={14} /> The Story
+                </h4>
+                <div className="gdm-desc-skeleton">
+                  <div className="gdm-skel-line" style={{ width: "100%" }} />
+                  <div className="gdm-skel-line" style={{ width: "95%" }} />
+                  <div className="gdm-skel-line" style={{ width: "98%" }} />
+                  <div className="gdm-skel-line" style={{ width: "55%" }} />
+                </div>
+              </div>
+            ) : storyText ? (
+              <div className="gdm-story-section gdm-animate-build gdm-delay-final">
+                <h4 className="gdm-section-title">
+                  <BookOpen size={14} /> The Story
+                </h4>
+                <div className={`gdm-story-content-wrapper ${isExpanded ? "gdm-story-expanded" : ""}`}>
+                  <p className="gdm-story-text">
+                    {!isExpanded && storyText.length > 450
+                      ? `${storyText.slice(0, 450)}...`
+                      : storyText}
+                  </p>
+                </div>
+                {storyText.length > 450 && (
+                  <button className="gdm-story-toggle-btn" onClick={() => setIsExpanded(!isExpanded)}>
+                    <span>{isExpanded ? "Show Less" : "Show More"}</span>
+                  </button>
+                )}
+              </div>
+            ) : null}
+
+            {/* HLTB Section */}
+            {isSecondaryDataLoading ? (
+              <div className="gdm-hltb-section gdm-animate-build gdm-delay-secondary">
+                <h4 className="gdm-section-title">
+                  <Clock size={14} /> Time to Beat
+                </h4>
+                <div className="gdm-hltb-grid">
+                  {[...Array(3)].map((_, i) => (
+                    <div key={i} className="gdm-hltb-card" style={{ height: "80px", background: "rgba(255, 255, 255, 0.015)", border: "1px dashed rgba(255, 255, 255, 0.06)" }}>
+                      <div className="gdm-skel-line" style={{ width: "50%", height: "10px", marginTop: "10px" }} />
+                      <div className="gdm-skel-line" style={{ width: "80%", height: "18px", marginTop: "14px" }} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (hltb && (hltb.hastily || hltb.normally || hltb.completely)) ? (
+              <div className="gdm-hltb-section gdm-animate-build gdm-delay-secondary">
+                <h4 className="gdm-section-title">
+                  <Clock size={14} /> Time to Beat
+                </h4>
+                <div className="gdm-hltb-grid">
+                  {hltb.hastily && (
+                    <div className="gdm-hltb-card gdm-hltb-card--hastily">
+                      <span className="gdm-hltb-label">Hastily</span>
+                      <span className="gdm-hltb-hours">{hltb.hastily}</span>
+                      <span className="gdm-hltb-desc">Main Story</span>
+                    </div>
+                  )}
+                  {hltb.normally && (
+                    <div className="gdm-hltb-card gdm-hltb-card--normally">
+                      <span className="gdm-hltb-label">Normally</span>
+                      <span className="gdm-hltb-hours">{hltb.normally}</span>
+                      <span className="gdm-hltb-desc">Main + Extra</span>
+                    </div>
+                  )}
+                  {hltb.completely && (
+                    <div className="gdm-hltb-card gdm-hltb-card--completely">
+                      <span className="gdm-hltb-label">Completely</span>
+                      <span className="gdm-hltb-hours">{hltb.completely}</span>
+                      <span className="gdm-hltb-desc">Completionist</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {/* ════ BENTO GRID ════ */}
+            {isSecondaryDataLoading ? (
+              <div className="gdm-bento-grid gdm-animate-build gdm-delay-final">
+                {[...Array(4)].map((_, i) => (
+                  <div key={i} className="gdm-bento-cell" style={{ height: "80px", background: "rgba(255, 255, 255, 0.015)", border: "1px solid rgba(255, 255, 255, 0.04)", position: "relative" }}>
+                    <div className="gdm-skel-line" style={{ width: "40%", height: "10px", marginTop: "12px", background: "var(--skel-base)", animation: "skel-pulse 1.5s ease-in-out infinite" }} />
+                    <div className="gdm-skel-line" style={{ width: "80%", height: "14px", marginTop: "14px", background: "var(--skel-base)", animation: "skel-pulse 1.5s ease-in-out infinite" }} />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="gdm-bento-grid gdm-animate-build gdm-delay-final">
+
+                {/* ── Main Developer — hidden if empty ── */}
+                {game.developers?.length > 0 && (
+                  <div className="gdm-bento-cell gdm-bento-cell--high-contrast">
+                    <span className="gdm-bento-label">
+                      <Building2 size={11} className="gdm-bento-icon" /> Developer
+                    </span>
+                    <div className="gdm-bento-value">{game.developers.join(", ")}</div>
+                  </div>
+                )}
+
+                {/* ── Published By — hidden if empty ── */}
+                {game.publishers?.length > 0 && (
+                  <div className="gdm-bento-cell gdm-bento-cell--high-contrast">
+                    <span className="gdm-bento-label">
+                      <Users size={11} className="gdm-bento-icon" /> Published By
+                    </span>
+                    <div className="gdm-bento-value">{game.publishers.join(", ")}</div>
+                  </div>
+                )}
+
+                {/* ── Game Engine — hidden if empty ── */}
+                {game.game_engines?.length > 0 && (
+                  <div className="gdm-bento-cell">
+                    <span className="gdm-bento-label">
+                      <Layers size={11} className="gdm-bento-icon" /> Game Engine
+                    </span>
+                    <div className="gdm-bento-value">{game.game_engines.join(", ")}</div>
+                  </div>
+                )}
+
+                {/* ── Franchise & Series — hidden if empty ── */}
+                {(game.franchises?.length > 0 || game.series) && (
+                  <div className="gdm-bento-cell gdm-bento-cell--wide">
+                    <span className="gdm-bento-label">
+                      <Compass size={11} className="gdm-bento-icon" /> Franchise & Series
+                    </span>
+                    <div className="gdm-bento-series-row">
+                      {game.series && (
+                        <div className="gdm-bento-series-badge">
+                          <span>Series:</span> {game.series}
+                        </div>
+                      )}
+                      {game.franchises?.length > 0 && (
+                        <div className="gdm-bento-franchise-text">
+                          <span>Franchise:</span> {game.franchises.join(", ")}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Game Modes — hidden if empty ── */}
+                {hasModes && (
+                  <BentoChips label="Game Modes" items={game.game_modes}
+                    icon={<Gamepad size={11} className="gdm-bento-icon" />} />
+                )}
+
+                {/* ── Player Perspectives — hidden if empty ── */}
+                {hasPerspectives && (
+                  <BentoChips label="Perspectives" items={game.player_perspectives}
+                    icon={<Eye size={11} className="gdm-bento-icon" />} />
+                )}
+
+                {/* ── Keywords — hidden if empty ── */}
+                {hasKeywords && (
+                  <BentoChips label="Keywords" items={game.keywords.slice(0, 10)}
+                    icon={<Tag size={11} className="gdm-bento-icon" />}
+                    accentClass="gdm-bento-cell--wide" />
+                )}
+
+              </div>
             )}
+
+            {/* Similar Games Section */}
+            {isSecondaryDataLoading ? (
+              <div className="gdm-similar-section gdm-animate-build gdm-delay-final" style={{ marginTop: "24px" }}>
+                <h4 className="gdm-section-title">
+                  <Layers size={14} /> Similar Games
+                </h4>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "14px", marginTop: "10px" }}>
+                  {[...Array(3)].map((_, i) => (
+                    <div key={i} style={{ width: "100%", aspectRatio: "3/4", borderRadius: "10px", background: "var(--skel-base)", animation: "skel-pulse 1.5s ease-in-out infinite" }} />
+                  ))}
+                </div>
+              </div>
+            ) : (game.similar_games?.length > 0) ? (
+              <div className="gdm-similar-section gdm-animate-build gdm-delay-final">
+                <h4 className="gdm-section-title">
+                  <Layers size={14} /> Similar Games
+                </h4>
+                <div className="gdm-similar-list">
+                  {game.similar_games.map(sg => (
+                    <div key={sg.id} className="gdm-similar-card" onClick={() => {
+                      setFullGame(null);
+                      setScreenshots([]);
+                      setActiveImg(0);
+                      setHltb(null);
+                      setActiveGame(sg);
+                    }}>
+                      {sg.cover_url ? (
+                        <img src={sg.cover_url} alt={sg.name} className="gdm-similar-cover" />
+                      ) : (
+                        <div className="gdm-similar-cover-fallback">
+                          <ImageIcon size={18} />
+                        </div>
+                      )}
+                      <span className="gdm-similar-name">{sg.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
           </div>
 
-          {/* RIGHT: Metadata sidebar */}
+          {/* ── RIGHT COLUMN ── */}
+          {/* ── RIGHT COLUMN ── */}
           <aside className="gdm-col-right">
 
-            {/* DNA Compatibility Meter */}
+            {/* ── Scores (User / Critic) ── */}
+            {isSecondaryDataLoading ? (
+              <div className="gdm-sidebar-card gdm-animate-build gdm-delay-final">
+                <span className="gdm-sidebar-label">
+                  <Star size={11} className="gdm-bento-icon" /> Scores
+                </span>
+                <div className="gdm-scores-skeleton-row" style={{ marginTop: "14px", display: "flex", gap: "24px", justifyContent: "center" }}>
+                  <div className="gdm-skel-circle" style={{ width: "64px", height: "64px", borderRadius: "50%", background: "var(--skel-base)", animation: "skel-pulse 1.5s ease-in-out infinite" }} />
+                  <div className="gdm-skel-circle" style={{ width: "64px", height: "64px", borderRadius: "50%", background: "var(--skel-base)", animation: "skel-pulse 1.5s ease-in-out infinite" }} />
+                </div>
+              </div>
+            ) : hasRatings ? (
+              <div className="gdm-sidebar-card gdm-animate-build gdm-delay-final">
+                <span className="gdm-sidebar-label">
+                  <Star size={11} className="gdm-bento-icon" /> Scores
+                </span>
+                <div className="gdm-scores-row" style={{ marginTop: "10px", display: "flex", gap: "16px", justifyContent: "center" }}>
+                  {userRating > 0 && (
+                    <ScoreRing value={userRating} label="User" count={userCount}
+                      color="var(--accent)" size={72} />
+                  )}
+                  {criticRating > 0 && (
+                    <ScoreRing value={criticRating} label="Critic" count={criticCount}
+                      color="var(--accent-violet)" size={72} />
+                  )}
+                </div>
+              </div>
+            ) : null}
+
+            {/* ── DNA Compatibility ── */}
             {dnaWeights && (
-              <CompatibilityMeter
-                match={dnaMatch?.match ?? 50}
-                label={dnaMatch?.label ?? "Scanning…"}
-                loading={dnaLoading}
-              />
+              <div className="gdm-sidebar-card gdm-animate-build gdm-delay-high" style={{ background: "rgba(0, 212, 255, 0.04)", borderColor: "rgba(0, 212, 255, 0.15)" }}>
+                <span className="gdm-sidebar-label" style={{ color: "var(--accent)" }}>
+                  <Sparkles size={11} className="gdm-bento-icon gdm-bento-icon--pulse" /> DNA Compatibility
+                </span>
+                <div style={{ marginTop: "10px", display: "flex", justifyContent: "center" }}>
+                  <DnaProgressRing
+                    match={dnaMatch?.match ?? 0}
+                    label={dnaMatch?.label ?? "Scanning…"}
+                    loading={false}
+                    size={84}
+                  />
+                </div>
+              </div>
             )}
 
             {/* Library Actions */}
-            <div className="gdm-actions">
+            <div className="gdm-actions gdm-animate-build gdm-delay-high">
               {[
                 { key: "playing", Icon: Gamepad, label: "Playing", activeLabel: "Playing ✓" },
                 { key: "wishlist", Icon: Bookmark, label: "Wishlist", activeLabel: "Wishlisted" },
                 { key: "played", Icon: Play, label: "Played", activeLabel: "Played ✓" },
               ].map(({ key, Icon, label, activeLabel }) => (
-                <button
-                  key={key}
+                <button key={key}
                   className={`gdm-action-btn ${status === key ? "gdm-action-btn--active" : ""}`}
-                  onClick={() => handleLibraryAction(key)}
-                >
+                  onClick={() => handleLibraryAction(key)}>
                   <Icon size={13} />
                   <span>{status === key ? activeLabel : label}</span>
                   {status === key && <Check size={11} className="gdm-action-check" />}
@@ -549,9 +891,8 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
             </div>
 
             {/* Like / Favorite */}
-            <div className="gdm-social-btns">
-              <button
-                className={`gdm-icon-btn ${isLiked ? "gdm-icon-btn--liked" : ""}`}
+            <div className="gdm-social-btns gdm-animate-build gdm-delay-high">
+              <button className={`gdm-icon-btn ${isLiked ? "gdm-icon-btn--liked" : ""}`}
                 onClick={() => {
                   if (!game) return;
                   const c = library?.get(game.id);
@@ -561,18 +902,14 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
                     game_id: game.id, game_name: game.name,
                     genres: game.genre_slugs ?? [], rating: game.rating ?? 0,
                     status: c?.status ?? null, is_liked: nowLiked,
-                    is_favorite: c?.isFavorite ?? false,
-                    image_url: game.background_image,
+                    is_favorite: c?.isFavorite ?? false, image_url: game.background_image,
                   });
                   addToast(nowLiked ? "DNA Pattern Updated! 🧬" : "Unliked", nowLiked ? "liked" : "info");
-                }}
-                aria-label="Like"
-              >
+                }} aria-label="Like">
                 <Heart size={14} fill={isLiked ? "currentColor" : "none"} />
                 <span>{isLiked ? "Liked" : "Like"}</span>
               </button>
-              <button
-                className={`gdm-icon-btn ${isFavorite ? "gdm-icon-btn--fav" : ""}`}
+              <button className={`gdm-icon-btn ${isFavorite ? "gdm-icon-btn--fav" : ""}`}
                 onClick={() => {
                   if (!game) return;
                   const c = library?.get(game.id);
@@ -583,64 +920,52 @@ function GameDetailModal({ game: cardGame, library, dispatch, addToast, onClose,
                     genres: game.genre_slugs ?? [], rating: game.rating ?? 0,
                     status: c?.status ?? null,
                     is_liked: nowFav ? true : (c?.isLiked ?? false),
-                    is_favorite: nowFav,
-                    image_url: game.background_image,
+                    is_favorite: nowFav, image_url: game.background_image,
                   });
                   addToast(nowFav ? "Glitch noted your favorite! ⭐" : "Removed from favorites", nowFav ? "liked" : "info");
-                }}
-                aria-label="Favorite"
-              >
+                }} aria-label="Favorite">
                 <Star size={14} fill={isFavorite ? "currentColor" : "none"} />
                 <span>{isFavorite ? "Favorited" : "Favorite"}</span>
               </button>
             </div>
 
-            {/* HLTB playtime boxes */}
-            <HltbBoxes hltb={game.hltb} />
-
-            {/* Tech Specs grid */}
-            <TechGrid
-              pcReqs={game.pc_requirements}
-              developer={game.developers}
-              esrb={game.esrb_rating}
-              platforms={game.platforms}
-            />
-
-            {/* View on Steam */}
-            {(game.steam_url || game.website) && (
-              <a
-                href={game.steam_url || game.website}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="gdm-steam-btn"
-                onClick={e => e.stopPropagation()}
-              >
-                <ShoppingCart size={14} />
-                <span>View on Steam</span>
-                <ExternalLink size={12} className="gdm-steam-ext" />
+            {/* ── Steam Button ── */}
+            {hasSteam && !isSecondaryDataLoading && (
+              <a href={game.steam_url} target="_blank" rel="noopener noreferrer"
+                className="gdm-steam-btn gdm-animate-build gdm-delay-secondary" onClick={e => e.stopPropagation()}>
+                <div className="gdm-steam-btn-icon">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                    <path d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.718L.22 15.996C1.785 20.558 6.504 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.455 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.663 0-3.015 1.353-3.015 3.015 0 1.663 1.352 3.015 3.015 3.015 1.663 0 3.015-1.352 3.015-3.015zm-5.273.012c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.252 0-2.265-1.014-2.265-2.265z" />
+                  </svg>
+                </div>
+                <div className="gdm-steam-btn-text">
+                  <span className="gdm-steam-btn-label">Available on</span>
+                  <span className="gdm-steam-btn-name">Steam</span>
+                </div>
+                <ExternalLink size={13} className="gdm-steam-ext" />
               </a>
             )}
 
-            {/* Trailer link */}
-            {(game.trailer_url || game.clip?.clip) && (
-              <a
-                href={game.trailer_url || game.clip?.clip}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="gdm-trailer-btn"
-                onClick={e => e.stopPropagation()}
-              >
+            {/* Trailer — hidden if no url */}
+            {hasTrailer && !isSecondaryDataLoading && (
+              <a href={game.trailer_url || game.clip?.clip} target="_blank"
+                rel="noopener noreferrer" className="gdm-trailer-btn gdm-animate-build gdm-delay-secondary"
+                onClick={e => e.stopPropagation()}>
                 <Play size={13} />
                 <span>Watch Trailer</span>
                 <ExternalLink size={12} />
               </a>
             )}
 
-            {/* Publishers */}
-            {game.publishers?.length > 0 && (
-              <div className="gdm-publishers">
-                <span className="gdm-sidebar-label">PUBLISHED BY</span>
-                <span className="gdm-pub-name">{game.publishers.slice(0, 2).join(", ")}</span>
+            {/* Tags — hidden if empty */}
+            {hasTags && !isSecondaryDataLoading && (
+              <div className="gdm-tags-section gdm-animate-build gdm-delay-final" style={{ marginTop: "8px" }}>
+                <span className="gdm-sidebar-label">TAGS</span>
+                <div className="gdm-tags">
+                  {game.tags.slice(0, 8).map(t => (
+                    <span key={t} className="gdm-tag">{t}</span>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -1559,8 +1884,27 @@ function GameCard({
         </div>
         <div className="card-footer">
           {!suppressRating && (
-            <div className="card-rating" style={{ color: ratingColor(game.rating) }}>
-              <Star size={13} fill="currentColor" /><span>{game.rating?.toFixed(1) ?? "—"}</span>
+            <div className="card-rating-group" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div className="card-rating" style={{ color: ratingColor(game.rating) }}>
+                <Star size={13} fill="currentColor" /><span>{game.rating?.toFixed(1) ?? "—"}</span>
+              </div>
+              {((game.total_rating_count ?? game.rating_count ?? 0) > 0) && (
+                <div
+                  className="card-rating-count"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '0.75rem',
+                    color: ((game.total_rating_count ?? game.rating_count ?? 0) < 50 && (game.follows || 0) < 100) ? '#fbbf24' : 'var(--text-muted, #9ca3af)',
+                    fontWeight: 500
+                  }}
+                  title={`Consensus Score (based on ${game.total_rating_count ?? game.rating_count ?? 0} sources)`}
+                >
+                  <Users size={11} opacity={0.7} />
+                  <span>{formatNumber(game.total_rating_count ?? game.rating_count ?? 0)}</span>
+                </div>
+              )}
             </div>
           )}
           {game.released && <span className="card-released">{new Date(game.released).getFullYear()}</span>}
@@ -1714,9 +2058,109 @@ function PersistentHeader({
   onNavigateLibrary, onNavigateDashboard, onLogout,
   wishlistCount, likedCount, playedCount, playingCount,
   svmMode, isDiscoveryActive, isFirstLoad, searchRef,
+  onOverlayOpen,
 }) {
   const isLibrary = view === "library";
   const isMax = level >= 20;
+
+  const [suggestions, setSuggestions] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [selIndex, setSelIndex] = useState(-1);
+  const formRef = useRef(null);
+
+  // 1. Debounced fetching of search suggestions
+  useEffect(() => {
+    const query = searchInput.trim();
+    if (query.length < 2) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    const handler = setTimeout(() => {
+      let active = true;
+      fetch(`${API_BASE}/search/suggestions?q=${encodeURIComponent(query)}`)
+        .then(res => res.ok ? res.json() : [])
+        .then(data => {
+          if (active && Array.isArray(data)) {
+            setSuggestions(data);
+            if (document.activeElement === searchRef.current && data.length > 0) {
+              setShowSuggestions(true);
+            }
+          }
+        })
+        .catch(() => { });
+      return () => { active = false; };
+    }, 300);
+
+    return () => clearTimeout(handler);
+  }, [searchInput, searchRef]);
+
+  // 2. Click Outside logic to dismiss suggestion dropdown
+  useEffect(() => {
+    const handleOutsideClick = (e) => {
+      if (formRef.current && !formRef.current.contains(e.target)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, []);
+
+  // Keyboard navigation & interaction handlers
+  const handleKeyDown = (e) => {
+    if (e.key === "Escape") {
+      setShowSuggestions(false);
+      searchRef.current?.blur();
+      return;
+    }
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      setShowSuggestions(false);
+      setSuggestions([]);
+      searchRef.current?.blur();
+      if (showSuggestions && selIndex >= 0 && selIndex < suggestions.length) {
+        const selectedGame = suggestions[selIndex];
+        setSearchInput(selectedGame.name);
+        setSelIndex(-1);
+        setTimeout(() => {
+          onSearch();
+        }, 50);
+      } else {
+        onSearch();
+      }
+      return;
+    }
+
+    if (!showSuggestions || suggestions.length === 0) return;
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelIndex(prev => (prev + 1) % suggestions.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelIndex(prev => (prev - 1 + suggestions.length) % suggestions.length);
+    }
+  };
+
+  const handleSuggestionClick = (game) => {
+    setSearchInput(game.name);
+    setShowSuggestions(false);
+    setSelIndex(-1);
+    setTimeout(() => {
+      onSearch();
+    }, 50);
+  };
+
+  const handleDetailsClick = (e, game) => {
+    e.stopPropagation(); // Prevent trigger of standard row click
+    setShowSuggestions(false);
+    if (onOverlayOpen) {
+      onOverlayOpen(game);
+    }
+  };
+
   return (
     <motion.header className="dash-header"
       variants={isFirstLoad ? bootMain : undefined}
@@ -1745,19 +2189,106 @@ function PersistentHeader({
           )}
         </AnimatePresence>
       </div>
-      <motion.form className="search-form" onSubmit={onSearch}
+
+      <motion.form
+        ref={formRef}
+        className="search-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setShowSuggestions(false);
+          setSuggestions([]);
+          searchRef.current?.blur();
+          onSearch(e);
+        }}
         animate={isLibrary ? { opacity: 0, y: -8, pointerEvents: "none" } : { opacity: 1, y: 0, pointerEvents: "auto" }}
         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
         aria-hidden={isLibrary}>
         <Search size={16} className="search-icon" />
-        <input ref={searchRef} type="text"
+        <input
+          ref={searchRef}
+          type="text"
           placeholder='Search games… ("/" to focus)'
           value={searchInput}
-          onChange={e => setSearchInput(e.target.value)}
+          onFocus={() => { if (searchInput.trim().length > 0) setShowSuggestions(true); }}
+          onKeyDown={handleKeyDown}
+          onChange={e => {
+            const val = e.target.value;
+            setSearchInput(val);
+            if (val.trim().length > 0) {
+              setShowSuggestions(true);
+            } else {
+              setShowSuggestions(false);
+              setSuggestions([]);
+            }
+          }}
           className="search-input" />
-        {searchInput && <button type="button" className="search-clear" onClick={onClearSearch}><X size={14} /></button>}
+        {searchInput && (
+          <button
+            type="button"
+            className="search-clear"
+            onClick={() => { onClearSearch(); setSuggestions([]); setShowSuggestions(false); }}
+            style={{ marginRight: "4px" }}>
+            <X size={14} />
+          </button>
+        )}
         <button type="submit" className="search-submit">Search</button>
+
+        {/* Suggestion Dropdown */}
+        <AnimatePresence>
+          {showSuggestions && suggestions.length > 0 && (
+            <motion.div
+              className="search-suggestions"
+              initial={{ opacity: 0, y: 8, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 8, scale: 0.98 }}
+              transition={{ duration: 0.15, ease: "easeOut" }}>
+              {suggestions.map((game, index) => {
+                const isSelected = index === selIndex;
+                const releaseYear = game.released ? new Date(game.released).getFullYear() : "N/A";
+                const rating = game.rating ? game.rating.toFixed(1) : null;
+
+                return (
+                  <div
+                    key={game.id}
+                    className={`search-suggestion-item ${isSelected ? "search-suggestion-item--selected" : ""}`}
+                    onClick={() => handleSuggestionClick(game)}
+                    onMouseEnter={() => setSelIndex(index)}>
+                    {game.background_image ? (
+                      <img
+                        src={game.background_image}
+                        alt={game.name}
+                        className="search-suggestion-thumb" />
+                    ) : (
+                      <div className="search-suggestion-thumb" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <Gamepad size={14} opacity={0.3} />
+                      </div>
+                    )}
+                    <div className="search-suggestion-info">
+                      <div className="search-suggestion-name">{game.name}</div>
+                      <div className="search-suggestion-meta">
+                        <span>{releaseYear}</span>
+                        {rating && (
+                          <span className="search-suggestion-rating">
+                            <Star size={10} fill="currentColor" />
+                            {rating}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="search-suggestion-btn"
+                      onClick={(e) => handleDetailsClick(e, game)}>
+                      Details
+                    </button>
+                  </div>
+                );
+              })}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </motion.form>
+
       <div className="dash-header-right">
         <span className="header-user-mode"><User size={14} />{isLoggedIn ? userMode : "Guest"}</span>
         <button className="header-icon-btn" onClick={onNavigateLibrary} aria-label="Library">
@@ -1803,6 +2334,7 @@ function Dashboard({
   const [portalTarget, setPortalTarget] = useState(null);
   const [activeSection, setActiveSection] = useState("");
   const [appliedDnaWeights, setAppliedDnaWeights] = useState(dnaWeights);
+  const [syncPulse, setSyncPulse] = useState(false);
   const [recalibrateTick, setRecalibrateTick] = useState(0);
   const [yearFilter, setYearFilter] = useState("all");
   const scrollRef = useRef(null);
@@ -1842,7 +2374,7 @@ function Dashboard({
     searchQuery,
     genre: activeGenre,
     userId,
-    dnaWeights: isDiscovery ? appliedDnaWeights : null,
+    dnaWeights: isDiscovery ? dnaWeights : null,
     dnaOffsets: isDiscovery ? dnaOffsets : null,
     discoveryMode: isDiscovery && isLoggedIn,
     salt: recalibrateTick,
@@ -1890,7 +2422,13 @@ function Dashboard({
     const obs = new IntersectionObserver(
       ([e]) => {
         if (e.isIntersecting && hasMore && !loading && !loadingMore) {
-          if (isDiscovery) setAppliedDnaWeights(dnaWeights);
+          if (isDiscovery) {
+            if (JSON.stringify(dnaWeights) !== JSON.stringify(appliedDnaWeights)) {
+              setSyncPulse(true);
+              setTimeout(() => setSyncPulse(false), 2500);
+              setAppliedDnaWeights(dnaWeights);
+            }
+          }
           loadMore();
         }
       },
@@ -1898,7 +2436,7 @@ function Dashboard({
     );
     obs.observe(s);
     return () => obs.disconnect();
-  }, [hasMore, loading, loadingMore, loadMore, isDiscovery, dnaWeights]);
+  }, [hasMore, loading, loadingMore, loadMore, isDiscovery, dnaWeights, appliedDnaWeights]);
 
   /* "/" shortcut */
   useEffect(() => {
@@ -2287,7 +2825,7 @@ function Dashboard({
 
             {isDiscovery && (
               <motion.button
-                className="recalibrate-btn"
+                className={`recalibrate-btn ${syncPulse ? "sync-pulse" : ""}`}
                 onClick={() => {
                   const freshWeights = { ...dnaWeights };
                   setAppliedDnaWeights(freshWeights);
@@ -2505,7 +3043,7 @@ export default function App() {
         const result = await loginWithGoogle();
         if (result?.linkRequired) return result;
       } else if (action === "link") {
-        const googleCred = extra; 
+        const googleCred = extra;
         await linkAccounts(email, password, googleCred);
       } else if (action === "login") {
         await loginWithEmail(email, password);
@@ -2617,7 +3155,8 @@ export default function App() {
               wishlistCount={wishlistCount} likedCount={likedCount}
               playedCount={playedCount} playingCount={playingCount}
               svmMode={svmMode} isDiscoveryActive={isDiscoveryActive}
-              isFirstLoad={isFirstLoad} searchRef={searchRef} />
+              isFirstLoad={isFirstLoad} searchRef={searchRef}
+              onOverlayOpen={setOverlayGame} />
 
             <div style={{
               position: "fixed", inset: 0,

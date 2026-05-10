@@ -1,32 +1,31 @@
 """
-Game Discovery Engine — Flask Backend  V12 "Dynamic DNA"
+Game Discovery Engine — Flask Backend  V14 "Infinite Exploration"
 ================================================
-CHANGES FROM V11 (Iron Star Phase 2):
+CHANGES FROM V13 (Strict DNA):
 
-  DISCOVERY PIPELINE REWRITE
-    _fetch_discovery_pool()  — NEW: IGDB multi-query that fetches three
-                               independent pools and deduplicates them.
-      Pool A (Global AAA)   — top 40 games sorted by follows, no genre filter.
-      Pool B (DNA AAA)      — top 40 games in the user's top-1 genre by follows.
-      Pool C (DNA Gems)     — top 40 games in the user's top-1 genre by rating.
-      Result: ~80-120 unique, genre-diverse games for the blender.
+  DISCOVERY POOL (80/20 SPLIT + PAGINATION)
+    _fetch_discovery_pool(page)  — Accepts a `page` arg so each scroll
+                                   loads a fresh IGDB offset slice.
+      DNA Pool (80%)  — Proportional genre sub-queries (unchanged logic).
+                         Each sub-query offset = (page-1)*50 + jitter[0,50].
+      Wildcard (20%)  — pool_wildcard: top games by follows, NO genre filter.
+                         Gives users serendipitous discoveries outside their DNA.
+      Games tagged _is_wildcard=True so the ranker treats them separately.
 
-  svm_rank() REWRITE
-    - Bulletproof cold-start: when pipe is None, a simulated probability is
-      computed directly from the manual gw_ slider weights so the sliders
-      always control the feed (was: neutral 0.5 for everything).
-    - Buckets now use follows-based thresholds (not raw_prob < 0.5 heuristic).
-    - Bucket 3 (Hidden Gems) requires high DNA match AND high rating.
-    - Wildcard bucket uses shuffled low-match games for exploration.
-    - Pattern while-loop: 4 × B1 + 4 × B2 + 5 × B3 + 5 × B4 repeating.
+  svm_rank() INTERLEAVING
+    - Wildcards are scored normally but given a floor score of 0.15 so
+      they aren't completely buried by the DNA-match signal.
+    - DNA-ranked games and wildcard games are interleaved at a 4:1 ratio
+      (1 wildcard every 4 DNA games) so exploration titles appear throughout
+      the feed rather than just at the very bottom.
 
-  get_games() PATCH
-    - In discovery_mode the single IGDB call is replaced by
-      _fetch_discovery_pool() when gw_ params are present.
-    - Falls back gracefully to the original single-call path if the
-      multi-query fails or no gw_ params are supplied.
+  get_games() PAGINATION FIX
+    - Discovery mode now returns "next" as a full URL string with all gw_
+      params encoded, e.g. /api/games?discovery_mode=true&user_id=...&page=2
+    - Allows the frontend useInfiniteGames hook (setHasMore(Boolean(data.next)))
+      to correctly activate infinite scroll on the Discovery Hub.
 
-  SYNTAX / STABILITY GUARDS
+  SYNTAX / STABILITY GUARDS  (carried over from V13)
     - All IGDB array checks use ()  e.g. genres = (4,5)
     - All follows/rating reads guarded with  g.get("follows") or 0
     - Single sort field per IGDB query (no comma-separated sorts)
@@ -448,17 +447,7 @@ STORE_META = {
     11: {"name": "Epic Games Store",  "color": "#2a2a2a", "logo": "epic"},
 }
 
-HLTB_GENRE_ESTIMATES = {
-    "rpg":        {"main_story": 40,  "completionist": 100},
-    "action":     {"main_story": 12,  "completionist": 30 },
-    "adventure":  {"main_story": 10,  "completionist": 20 },
-    "strategy":   {"main_story": 20,  "completionist": 60 },
-    "puzzle":     {"main_story": 5,   "completionist": 12 },
-    "simulation": {"main_story": 30,  "completionist": 80 },
-    "indie":      {"main_story": 6,   "completionist": 15 },
-    "sports":     {"main_story": 5,   "completionist": 40 },
-}
-HLTB_DEFAULT = {"main_story": 12, "completionist": 30}
+# HLTB estimates removed (using dynamic null fallbacks)
 
 STEAM_FALLBACK_MSG = "Analyzing requirements... Check Steam Store for official data."
 
@@ -587,21 +576,29 @@ def norm_game(g: dict) -> dict:
     theme_names = [t.get('name') for t in g.get('themes', [])]
     all_tags = sorted(list(set(genre_names + theme_names)))
 
+    user_count = g.get("rating_count") or 0
+    critic_count = g.get("aggregated_rating_count") or 0
+    total_rating_count = user_count + critic_count
+    if total_rating_count == 0:
+        total_rating_count = g.get("total_rating_count") or 0
+
     return {
-        "id":               g.get("id"),
-        "name":             g.get("name"),
-        "background_image": igdb_img(g.get("cover", {}).get("image_id"), "t_720p"),
-        "rating":           (g.get("total_rating") or 0) / 10.0,
-        "released":         formatted_date,
-        "genres":           genre_names,
-        "genre_slugs":      list(dna_slugs),
-        "dna_slugs":        list(dna_slugs),
-        "slug":             g.get("slug"),
-        "platforms":        [p.get("name") for p in g.get("platforms", [])],
-        "developer":        None,
-        "tags":             all_tags[:6],
-        "hypes":            g.get("hypes", 0),
-        "follows":          g.get("follows") or 0,
+        "id":                 g.get("id"),
+        "name":               g.get("name"),
+        "background_image":   igdb_img(g.get("cover", {}).get("image_id"), "t_720p"),
+        "rating":             (g.get("total_rating") or 0) / 10.0,
+        "released":           formatted_date,
+        "genres":             genre_names,
+        "genre_slugs":        list(dna_slugs),
+        "dna_slugs":          list(dna_slugs),
+        "slug":               g.get("slug"),
+        "platforms":          [p.get("name") for p in g.get("platforms", [])],
+        "developer":          None,
+        "tags":               all_tags[:6],
+        "hypes":              g.get("hypes", 0),
+        "follows":            g.get("follows") or 0,
+        "total_rating_count": total_rating_count,
+        "rating_count":       total_rating_count,
     }
 
 
@@ -690,7 +687,7 @@ def _batch_popular_games(igdb_field: str, ids: list, limit_per: int = 3) -> dict
 
 # Full IGDB fields needed by norm_game
 _GAME_FIELDS = (
-    "fields name, cover.image_id, total_rating, hypes, follows, rating_count, "
+    "fields name, cover.image_id, total_rating, hypes, follows, total_rating_count, rating_count, aggregated_rating_count, "
     "first_release_date, genres.id, themes.id, themes.name, slug, platforms.name;"
 )
 
@@ -701,21 +698,22 @@ _DISCOVERY_WHERE_BASE = (
 )
 
 
-def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int) -> list:
+def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int, page: int = 1) -> list:
     """
-    V13 Proportional DNA Fetcher.
+    V14 Proportional DNA Fetcher with 80/20 Exploration Split & Pagination.
 
-    Builds one IGDB multi-query with one sub-query per active genre
-    (weight > 0).  Games per genre = proportional to slider weight so a
-    genre at 100 gets 4× the slots of one at 25.
+    80% DNA Pool  — proportional genre sub-queries weighted by slider values.
+    20% Wildcard  — top-rated games with NO genre filter for serendipitous
+                    discovery outside the user's comfort zone.
 
-    Every sub-query carries a randomised offset (0–150) so clicking
-    "Recalibrate" always fetches a fresh slice from IGDB's catalogue.
+    The `page` parameter drives a deterministic offset so each successive
+    infinite-scroll load fetches a genuinely fresh IGDB slice:
+        base_offset = (page - 1) * 50  +  random jitter [0, 50]
 
     Falls back to a single unfiltered query when no genre IDs map.
     Never crashes — returns [] on any IGDB error.
     """
-    # Only genres with a positive weight contribute to the pool
+    # Only genres with a positive weight contribute to the DNA pool
     active = {slug: w for slug, w in gw.items() if w > 0}
 
     date_clause = f"first_release_date < {now_ts}"
@@ -726,11 +724,11 @@ def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int) -> list:
 
     sub_queries: list = []
 
+    # ── 80 % DNA Pool ─────────────────────────────────────────────────────────
     if active:
         total_weight = sum(active.values())
-        # Allocate a total budget of 150 slots, proportionally per genre.
-        # Floor at 20 per genre so even a low slider gets a meaningful sample.
-        TOTAL_BUDGET = 150
+        # Allocate 120 slots to DNA (80 % of ~150 budget), proportionally.
+        DNA_BUDGET = 120
         for pool_idx, (slug, weight) in enumerate(
             sorted(active.items(), key=lambda kv: kv[1], reverse=True)
         ):
@@ -741,11 +739,13 @@ def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int) -> list:
             genre_filter = f"genres = ({','.join(genre_ids_for_slug)})"
             dna_where    = f"{base_where} & {genre_filter}"
 
-            # Proportional limit, clamped to [20, 50] so IGDB's per-query cap isn't hit
-            proportional = int(round((weight / total_weight) * TOTAL_BUDGET))
+            # Proportional limit, clamped to [20, 50]
+            proportional = int(round((weight / total_weight) * DNA_BUDGET))
             slot_limit   = max(20, min(50, proportional))
 
-            rand_offset  = random.randint(0, 150)
+            # Page-driven offset so each scroll loads a fresh slice
+            page_base    = (page - 1) * 50
+            rand_offset  = page_base + random.randint(0, 50)
 
             sub_queries.append(
                 f'query games "pool_{pool_idx}_{slug}" {{\n'
@@ -757,10 +757,24 @@ def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int) -> list:
                 f'}};'
             )
 
-    # Fallback: no slug mapped to IGDB IDs — broad unfiltered pool
-    if not sub_queries:
-        rand_offset = random.randint(0, 150)
-        sub_queries.append(
+    # ── 20 % Wildcard Pool — no genre filter, top-rated globally ─────────────
+    wildcard_base   = (page - 1) * 50
+    wildcard_offset = wildcard_base + random.randint(0, 50)
+    sub_queries.append(
+        f'query games "pool_wildcard" {{\n'
+        f'  {_GAME_FIELDS}\n'
+        f'  where {base_where};\n'
+        f'  sort follows desc;\n'
+        f'  limit 30;\n'
+        f'  offset {wildcard_offset};\n'
+        f'}};'
+    )
+
+    # Fallback: if no DNA slug mapped to IGDB IDs, wildcard alone is the pool
+    if len(sub_queries) == 1 and sub_queries[0].startswith('query games "pool_wildcard"'):
+        # Replace with a slightly larger wildcard
+        rand_offset = (page - 1) * 50 + random.randint(0, 50)
+        sub_queries = [
             f'query games "pool_fallback" {{\n'
             f'  {_GAME_FIELDS}\n'
             f'  where {base_where};\n'
@@ -768,7 +782,7 @@ def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int) -> list:
             f'  limit 50;\n'
             f'  offset {rand_offset};\n'
             f'}};'
-        )
+        ]
 
     body = "\n\n".join(sub_queries)
 
@@ -786,18 +800,29 @@ def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int) -> list:
             )
             return []
 
-        seen_ids: set  = set()
-        combined: list = []
+        seen_ids:   set  = set()
+        dna_games:  list = []
+        wc_games:   list = []
+
         for block in resp.json():
+            label = block.get("name", "")
+            is_wildcard = label in ("pool_wildcard", "pool_fallback")
             for g in (block.get("result") or []):
                 gid = g.get("id")
                 if gid and gid not in seen_ids:
                     seen_ids.add(gid)
-                    combined.append(norm_game(g))
+                    normed = norm_game(g)
+                    # Tag wildcard games so the ranker can treat them specially
+                    if is_wildcard:
+                        normed["_is_wildcard"] = True
+                        wc_games.append(normed)
+                    else:
+                        dna_games.append(normed)
 
+        combined = dna_games + wc_games
         logging.info(
-            "_fetch_discovery_pool: %d unique games from %d genre sub-queries",
-            len(combined), len(sub_queries),
+            "_fetch_discovery_pool (page=%d): %d DNA + %d wildcard = %d unique games",
+            page, len(dna_games), len(wc_games), len(combined),
         )
         return combined
 
@@ -858,8 +883,8 @@ def svm_rank(games: list, pipe, gw: dict = None, offsets: dict = None) -> list:
     V13 Strict DNA Ranker — zero popularity bias.
 
     Scoring formula:
-      With SVM model : final_score = (svm_prob * 0.4) + (dna_match_norm * 0.6)
-      Cold start      : final_score = dna_match_norm * (rating / 10.0)
+      With SVM model : final_score = ((svm_prob * 0.4) + (dna_match_norm * 0.6)) * (W / 10.0)
+      Cold start      : final_score = (dna_match_norm * 0.4 + pop_boost * 0.6) * (W / 10.0)
 
     dna_match is a dot-product of the game's genre presence vector and the
     user's gw slider values, normalised to [0, 1]:
@@ -905,12 +930,23 @@ def svm_rank(games: list, pipe, gw: dict = None, offsets: dict = None) -> list:
         else:
             dna_match = 0.0
 
+        # Bayesian Weighted Rating
+        v = float(g.get("rating_count") or 0.0)
+        R = rating
+        m = 50.0
+        C = 6.5
+        W = (v * R + m * C) / (v + m)
+        
+        # Popularity Anchor
+        pop_boost = math.log10((g.get("follows") or 0) + 10) / 5.0
+
         if pipe is not None:
             # SVM active: blend AI signal (40 %) with DNA match (60 %)
-            final_score = (svm_prob * 0.4) + (dna_match * 0.6)
+            raw_score = (svm_prob * 0.4) + (dna_match * 0.6)
+            final_score = raw_score * (W / 10.0)
         else:
-            # Cold start: DNA match weighted by 10-pt rating quality
-            final_score = dna_match * (rating / 10.0)
+            # Cold start: DNA match weighted by Bayesian Weighted Rating
+            final_score = (dna_match * 0.4 + pop_boost * 0.6) * (W / 10.0)
 
         scored_games.append({
             **g,
@@ -919,13 +955,45 @@ def svm_rank(games: list, pipe, gw: dict = None, offsets: dict = None) -> list:
             "dna_match": round(dna_match * 100, 1),   # expose as 0–100 % for UI
         })
 
-    # ── 3. Strict sort by final_score descending — no buckets ───────────────
-    result = sorted(scored_games, key=lambda x: x["svm_score"], reverse=True)
+    # ── 3. Separate wildcards before sorting ─────────────────────────────────
+    # Wildcards get a mild dna_match boost so they aren't completely buried,
+    # but we still interleave them throughout the feed rather than appending
+    # them all at the end.
+    for sg in scored_games:
+        if sg.get("_is_wildcard"):
+            # Give wildcards a floor score so at least some appear mid-feed
+            floor = max(sg["svm_score"], 0.15)
+            sg["svm_score"] = floor
+
+    dna_ranked = sorted(
+        [g for g in scored_games if not g.get("_is_wildcard")],
+        key=lambda x: x["svm_score"], reverse=True,
+    )
+    wc_ranked = sorted(
+        [g for g in scored_games if g.get("_is_wildcard")],
+        key=lambda x: x["svm_score"], reverse=True,
+    )
+
+    # ── 4. Interleave: insert 1 wildcard every 4 DNA games ───────────────────
+    result: list = []
+    wc_iter = iter(wc_ranked)
+    wc_game = next(wc_iter, None)
+    for i, game in enumerate(dna_ranked):
+        result.append(game)
+        # Insert a wildcard after every 4th DNA game
+        if (i + 1) % 4 == 0 and wc_game is not None:
+            result.append(wc_game)
+            wc_game = next(wc_iter, None)
+    # Append any remaining wildcards at the end
+    if wc_game is not None:
+        result.append(wc_game)
+    result.extend(wc_iter)   # drain remaining
 
     logging.info(
-        "svm_rank: %d games scored & sorted (mode=%s, top_score=%.4f)",
+        "svm_rank: %d games scored & interleaved (mode=%s, dna=%d, wildcard=%d, top_score=%.4f)",
         len(result),
         "svm" if pipe is not None else "cold_start",
+        len(dna_ranked), len(wc_ranked),
         result[0]["svm_score"] if result else 0,
     )
     return result
@@ -1193,6 +1261,32 @@ def get_hub(hub_type: str):
         return jsonify({"error": str(exc)}), 503
 
 
+# ── GET /api/search/suggestions ───────────────────────────────────────────────
+@app.route("/api/search/suggestions", methods=["GET"])
+def search_suggestions():
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify([])
+
+    fields = (
+        "fields name, cover.image_id, total_rating, hypes, follows, total_rating_count, rating_count, aggregated_rating_count, "
+        "first_release_date, genres.id, themes.id, themes.name, slug, platforms.name;"
+    )
+    q_clean = q.replace('"', '\\"')
+    query_body = f'{fields} where (name ~ *"{q_clean}"* | alternative_names.name ~ *"{q_clean}"* | slug ~ *"{q_clean}"*) & cover != null; sort aggregated_rating_count desc; limit 7;'
+
+    try:
+        resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query_body, timeout=10)
+        resp.raise_for_status()
+        raw_data = resp.json()
+    except Exception as exc:
+        logging.error("IGDB search suggestions error: %s", exc)
+        return jsonify({"error": str(exc)}), 503
+
+    games = [norm_game(g) for g in raw_data]
+    return jsonify(games)
+
+
 # ── GET /api/games ─────────────────────────────────────────────────────────────
 @app.route("/api/games", methods=["GET"])
 def get_games():
@@ -1256,7 +1350,7 @@ def get_games():
     )
 
     if _use_dynamic_pool:
-        games    = _fetch_discovery_pool(gw, exclude_ids, now_ts)
+        games    = _fetch_discovery_pool(gw, exclude_ids, now_ts, page=page)
         svm_mode = "raw"
 
         if games:
@@ -1276,11 +1370,23 @@ def get_games():
                 games    = sorted(games, key=lambda x: x.get("rating") or 0, reverse=True)
                 svm_mode = "cold_start"
 
+            # ── Build a persistent next URL so gw_ weights survive pagination ──
+            next_params = [
+                f"discovery_mode=true",
+                f"user_id={user_id}",
+                f"page={page + 1}",
+            ]
+            for slug, val in gw.items():
+                next_params.append(f"gw_{slug}={val}")
+            if exclude_ids:
+                next_params.append(f"exclude_ids={','.join(map(str, exclude_ids))}")
+            next_url = f"/api/games?{'&'.join(next_params)}"
+
             return jsonify({
                 "results":  games,
                 "count":    IGDB_TOTAL_COUNT,
-                "next":     None,       # multi-query pool is a single-page result
-                "previous": None,
+                "next":     next_url,
+                "previous": None if page <= 1 else f"/api/games?discovery_mode=true&user_id={user_id}&page={page - 1}",
                 "svm_mode": svm_mode,
             })
 
@@ -1362,16 +1468,16 @@ def get_games():
 
     where_parts.append("cover != null")
 
-    if not search:
-        where_clause = f"where {' & '.join(where_parts)};" if where_parts else ""
-    else:
-        search_safe_parts = [p for p in where_parts if p == "cover != null"]
-        where_clause = f"where {' & '.join(search_safe_parts)};" if search_safe_parts else ""
+    if search:
+        search_clean = search.replace('"', '\\"')
+        where_parts.append(f'(name ~ *"{search_clean}"* | alternative_names.name ~ *"{search_clean}"* | slug ~ *"{search_clean}"*)')
+        sort_clause = "sort aggregated_rating_count desc;"
+        current_limit = 100
+
+    where_clause = f"where {' & '.join(where_parts)};" if where_parts else ""
 
     if not sort_clause:
-        if search:
-            sort_clause = ""
-        elif discovery_mode:
+        if discovery_mode:
             sort_clause = "sort follows desc;"
         elif is_upcoming:
             sort_clause = "sort first_release_date asc;"
@@ -1384,13 +1490,10 @@ def get_games():
         else:
             sort_clause = "sort follows desc;"
 
-    fields            = "fields name, cover.image_id, total_rating, hypes, follows, first_release_date, genres.id, themes.id, themes.name, slug, platforms.name;"
+    fields            = "fields name, cover.image_id, total_rating, hypes, follows, total_rating_count, rating_count, aggregated_rating_count, first_release_date, genres.id, themes.id, themes.name, slug, platforms.name;"
     pagination_clause = f"limit {current_limit}; offset {offset};"
 
-    if search:
-        query_body = f"{fields} search \"{search}\"; {where_clause} {pagination_clause}"
-    else:
-        query_body = f"{fields} {where_clause} {sort_clause} {pagination_clause}"
+    query_body = f"{fields} {where_clause} {sort_clause} {pagination_clause}"
 
     try:
         resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query_body, timeout=12)
@@ -1429,16 +1532,31 @@ def get_games():
     })
 
 
+_game_detail_cache: dict = {}
+GAME_DETAIL_CACHE_TTL = 3600  # 1 hour cache TTL for instant loads
+
 # ── GET /api/games/<id> ────────────────────────────────────────────────────────
 @app.route("/api/games/<int:game_id>", methods=["GET"])
 def get_game(game_id: int):
+    cache_key = f"game_detail_{game_id}"
+    cached_entry = _game_detail_cache.get(cache_key)
+    if cached_entry and (time.time() - cached_entry[0]) < GAME_DETAIL_CACHE_TTL:
+        return jsonify(cached_entry[1])
+
     query = (
-        f"fields name, summary, cover.image_id, total_rating, first_release_date, "
+        f"fields name, summary, storyline, cover.image_id, total_rating, total_rating_count, rating_count, "
+        f"aggregated_rating, aggregated_rating_count, "
+        f"first_release_date, "
         f"genres.id, themes.name, slug, platforms.name, screenshots.image_id, "
         f"websites.url, websites.category, "
         f"involved_companies.company.name, involved_companies.developer, involved_companies.publisher, "
         f"age_ratings.category, age_ratings.rating, "
-        f"videos.video_id, videos.name; "
+        f"videos.video_id, videos.name, "
+        f"game_modes.name, player_perspectives.name, "
+        f"keywords.name, "
+        f"game_engines.name, franchises.name, collection.name, "
+        f"similar_games.name, similar_games.cover.url, similar_games.cover.image_id, "
+        f"external_games.category, external_games.url; "
         f"where id = {game_id};"
     )
     try:
@@ -1459,10 +1577,10 @@ def get_game(game_id: int):
         if ic.get("publisher"):  publishers.append(cname)
 
     ESRB_MAP = {1: "RP", 2: "EC", 3: "E", 4: "E10+", 5: "T", 6: "M", 7: "AO"}
-    esrb_rating = "Not Rated"
+    esrb_rating = None
     for ar in d.get("age_ratings", []):
         if ar.get("category") == 1:
-            esrb_rating = ESRB_MAP.get(ar.get("rating"), "Not Rated")
+            esrb_rating = ESRB_MAP.get(ar.get("rating"))
             break
 
     trailer_url = None
@@ -1472,11 +1590,13 @@ def get_game(game_id: int):
             trailer_url = f"https://www.youtube.com/watch?v={vid}"
             break
 
+    # Steam URL: explicitly filter external_games for category == 1 only
     steam_url = None
-    for w in d.get("websites", []):
-        if w.get("category") == 13:
-            steam_url = w.get("url")
-            break
+    if isinstance(d.get("external_games"), list):
+        for eg in d["external_games"]:
+            if isinstance(eg, dict) and eg.get("category") == 1:
+                steam_url = eg.get("url")
+                break
 
     genre_ids = [g.get("id") for g in d.get("genres", [])]
     theme_ids = [t.get("id") for t in d.get("themes", [])]
@@ -1492,17 +1612,111 @@ def get_game(game_id: int):
     theme_names = [t.get('name') for t in d.get('themes', [])]
     all_tags = sorted(list(set(names + theme_names)))
 
-    hltb = HLTB_DEFAULT.copy()
-    for s in slugs:
-        if s in HLTB_GENRE_ESTIMATES:
-            hltb = HLTB_GENRE_ESTIMATES[s].copy()
-            break
-
     pc_reqs  = steam_pc_requirements(d.get("name", ""))
     rel      = d.get("first_release_date")
     released = datetime.datetime.fromtimestamp(rel).strftime("%Y-%m-%d") if rel else None
+    released_formatted = datetime.datetime.fromtimestamp(rel).strftime("%B %d, %Y") if rel else None
 
-    return jsonify({
+    # Only include pc_requirements if we got real data (not the fallback message)
+    real_pc_reqs = None
+    if pc_reqs:
+        min_text = pc_reqs.get("minimum", "")
+        if min_text and min_text != STEAM_FALLBACK_MSG:
+            real_pc_reqs = pc_reqs
+
+    # Safely get list values for new specs arrays with type-checking
+    game_modes = []
+    if isinstance(d.get("game_modes"), list):
+        game_modes = [m.get("name") for m in d["game_modes"] if isinstance(m, dict) and m.get("name")]
+
+    player_perspectives = []
+    if isinstance(d.get("player_perspectives"), list):
+        player_perspectives = [p.get("name") for p in d["player_perspectives"] if isinstance(p, dict) and p.get("name")]
+
+    keywords = []
+    if isinstance(d.get("keywords"), list):
+        keywords = [k.get("name") for k in d["keywords"] if isinstance(k, dict) and k.get("name")]
+
+    game_engines = []
+    if isinstance(d.get("game_engines"), list):
+        game_engines = [e.get("name") for e in d["game_engines"] if isinstance(e, dict) and e.get("name")]
+
+    franchises = []
+    if isinstance(d.get("franchises"), list):
+        franchises = [f.get("name") for f in d["franchises"] if isinstance(f, dict) and f.get("name")]
+
+    collection_name = None
+    if isinstance(d.get("collection"), dict):
+        collection_name = d["collection"].get("name")
+
+    similar_games = []
+    if isinstance(d.get("similar_games"), list):
+        for sg in d["similar_games"]:
+            if isinstance(sg, dict) and sg.get("name"):
+                cover_image = None
+                sg_cover = sg.get("cover")
+                if isinstance(sg_cover, dict):
+                    img_id = sg_cover.get("image_id")
+                    if img_id:
+                        cover_image = igdb_img(img_id, "t_cover_big")
+                    elif sg_cover.get("url"):
+                        cover_url = sg_cover.get("url")
+                        if cover_url.startswith("//"):
+                            cover_image = "https:" + cover_url
+                        else:
+                            cover_image = cover_url
+                        cover_image = cover_image.replace("t_thumb", "t_cover_big")
+                similar_games.append({
+                    "id": sg.get("id"),
+                    "name": sg.get("name"),
+                    "cover_url": cover_image
+                })
+
+    hltb_data = None
+    try:
+        hltb_query = f"fields hastily, normally, completely; where game_id = {game_id};"
+        hltb_resp = requests.post(f"{IGDB_BASE}/game_time_to_beats", headers=get_igdb_headers(), data=hltb_query, timeout=5)
+        if hltb_resp.ok:
+            hltb_json = hltb_resp.json()
+            if hltb_json:
+                h_d = hltb_json[0]
+                def format_time(seconds):
+                    if not seconds or seconds <= 0:
+                        return None
+                    hours = seconds / 3600.0
+                    if hours.is_integer():
+                        return f"{int(hours)}h"
+                    return f"{round(hours, 1)}h"
+                hltb_data = {
+                    "hastily": format_time(h_d.get("hastily")),
+                    "normally": format_time(h_d.get("normally")),
+                    "completely": format_time(h_d.get("completely"))
+                }
+    except Exception as h_exc:
+        logging.error("get_game hltb fetch error: %s", h_exc)
+
+    # Format screenshots and check portrait cover (gallery fix logic)
+    screenshots_list = d.get("screenshots", [])
+    formatted_screenshots = []
+    portrait_cover = None
+    cover_image_id = d.get("cover", {}).get("image_id") if isinstance(d.get("cover"), dict) else None
+
+    if screenshots_list:
+        first_s = screenshots_list[0]
+        first_s_id = first_s.get("image_id")
+        
+        if cover_image_id and first_s_id == cover_image_id:
+            portrait_cover = igdb_img(first_s_id, "t_720p")
+            remaining_screenshots = screenshots_list[1:]
+        else:
+            remaining_screenshots = screenshots_list
+            
+        formatted_screenshots = [
+            {"id": s.get("id"), "image": igdb_img(s.get("image_id"), "t_720p")}
+            for s in remaining_screenshots
+        ]
+
+    res_dict = {
         "id":                          d.get("id"),
         "name":                        d.get("name"),
         "background_image":            igdb_img(d.get("cover", {}).get("image_id"), "t_720p"),
@@ -1510,48 +1724,97 @@ def get_game(game_id: int):
             igdb_img(d.get("screenshots", [{}])[0].get("image_id"), "t_720p")
             if d.get("screenshots") else None
         ),
-        "description_raw":  d.get("summary"),
-        "rating":           (d.get("total_rating") or 0) / 10.0,
-        "rating_top":       10,
-        "released":         released,
-        "playtime":         None,
-        "website":          d.get("websites", [{}])[0].get("url") if d.get("websites") else None,
-        "steam_url":        steam_url,
-        "trailer_url":      trailer_url,
-        "clip":             {"clip": trailer_url} if trailer_url else None,
-        "genres":           names,
-        "genre_slugs":      list(dna_slugs),
-        "dna_slugs":        list(dna_slugs),
-        "platforms":        [p.get("name") for p in d.get("platforms", [])],
-        "developers":       developers,
-        "publishers":       publishers,
-        "tags":             all_tags[:6],
-        "esrb_rating":      esrb_rating,
-        "pc_requirements":  pc_reqs,
-        "mac_requirements": None,
-        "hltb": {
-            "main_story":    hltb.get("main_story"),
-            "completionist": hltb.get("completionist"),
-            "source":        "genre-estimate",
+        "description_raw":      d.get("summary"),
+        "storyline":            d.get("storyline"),
+        "rating":               (d.get("total_rating") or 0) / 10.0,
+        "rating_count":         ((d.get("rating_count") or 0) + (d.get("aggregated_rating_count") or 0)) if (((d.get("rating_count") or 0) + (d.get("aggregated_rating_count") or 0)) > 0) else (d.get("total_rating_count") or 0),
+        "critic_rating":        round((d.get("aggregated_rating") or 0) / 10.0, 1),
+        "critic_rating_count":  d.get("aggregated_rating_count") or 0,
+        "rating_top":           10,
+        "released":             released,
+        "released_formatted":   released_formatted,
+        "playtime":             None,
+        "website":              None,
+        "steam_url":            steam_url,
+        "trailer_url":          trailer_url,
+        "clip":                 {"clip": trailer_url} if trailer_url else None,
+        "genres":               names,
+        "genre_slugs":          list(dna_slugs),
+        "dna_slugs":            list(dna_slugs),
+        "platforms":            [p.get("name") for p in d.get("platforms", [])] if d.get("platforms") else None,
+        "developers":           developers if developers else None,
+        "publishers":           publishers if publishers else None,
+        "companies": {
+            "developers": developers if developers else None,
+            "publishers": publishers if publishers else None
         },
-    })
+        "tags":                 all_tags[:6] if all_tags else None,
+        "esrb_rating":          esrb_rating,
+        "pc_requirements":      real_pc_reqs,
+        "mac_requirements":     None,
+        "game_modes":           game_modes if game_modes else None,
+        "player_perspectives":  player_perspectives if player_perspectives else None,
+        "keywords":             keywords if keywords else None,
+        "hltb":                 hltb_data,
+        "game_engines":         game_engines if game_engines else None,
+        "franchises":           franchises if franchises else None,
+        "series":               collection_name or None,
+        "similar_games":        similar_games if similar_games else None,
+        "screenshots":          formatted_screenshots,
+        "portrait_cover":       portrait_cover,
+    }
+
+    _game_detail_cache[cache_key] = (time.time(), res_dict)
+    return jsonify(res_dict)
 
 
 # ── GET /api/games/<id>/screenshots ───────────────────────────────────────────
 @app.route("/api/games/<int:game_id>/screenshots", methods=["GET"])
 def get_screenshots(game_id: int):
-    query = f"fields image_id; where game = {game_id}; limit 8;"
     try:
+        # 1. Fetch cover image ID first
+        cover_image_id = None
+        try:
+            g_query = f"fields cover.image_id; where id = {game_id};"
+            g_resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=g_query, timeout=5)
+            if g_resp.ok:
+                g_json = g_resp.json()
+                if g_json:
+                    cover_image_id = g_json[0].get("cover", {}).get("image_id")
+        except Exception as e:
+            logging.error("Failed to fetch cover in screenshots route: %s", e)
+
+        # 2. Fetch screenshots
+        query = f"fields image_id; where game = {game_id}; limit 8;"
         resp = requests.post(f"{IGDB_BASE}/screenshots", headers=get_igdb_headers(), data=query, timeout=10)
         resp.raise_for_status()
-        return jsonify({
-            "results": [
+        screenshots_data = resp.json()
+
+        results = []
+        portrait_cover = None
+
+        if screenshots_data:
+            first_s = screenshots_data[0]
+            first_s_id = first_s.get("image_id")
+            
+            if cover_image_id and first_s_id == cover_image_id:
+                portrait_cover = igdb_img(first_s_id, "t_720p")
+                remaining_screenshots = screenshots_data[1:]
+            else:
+                remaining_screenshots = screenshots_data
+            
+            results = [
                 {"id": s.get("id"), "image": igdb_img(s.get("image_id"), "t_720p")}
-                for s in resp.json()
+                for s in remaining_screenshots
             ]
+        
+        return jsonify({
+            "results": results,
+            "portrait_cover": portrait_cover
         })
-    except Exception:
-        return jsonify({"results": []})
+    except Exception as exc:
+        logging.error("get_screenshots error: %s", exc)
+        return jsonify({"results": [], "portrait_cover": None})
 
 
 # ── GET /api/games/<id>/stores ─────────────────────────────────────────────────
@@ -1579,21 +1842,35 @@ def get_stores(game_id: int):
 # ── GET /api/hltb/<id> ─────────────────────────────────────────────────────────
 @app.route("/api/hltb/<int:game_id>", methods=["GET"])
 def get_hltb(game_id: int):
-    query = f"fields genres.id; where id = {game_id};"
     try:
-        resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query, timeout=8)
-        if not resp.ok or not resp.json():
-            return jsonify(HLTB_DEFAULT)
-        genre_ids = [g.get("id") for g in resp.json()[0].get("genres", [])]
-        slugs     = [IGDB_GENRE_MAP[gid] for gid in genre_ids if gid in IGDB_GENRE_MAP]
-        est       = HLTB_DEFAULT.copy()
-        for s in slugs:
-            if s in HLTB_GENRE_ESTIMATES:
-                est = HLTB_GENRE_ESTIMATES[s].copy()
-                break
-        return jsonify({"game_id": game_id, **est, "source": "igdb+estimate"})
-    except Exception:
-        return jsonify(HLTB_DEFAULT)
+        headers = get_igdb_headers()
+        query = f"fields hastily, normally, completely; where game_id = {game_id};"
+        resp = requests.post(f"{IGDB_BASE}/game_time_to_beats", headers=headers, data=query, timeout=5)
+        if not resp.ok:
+            return jsonify(None)
+        
+        data = resp.json()
+        if not data:
+            return jsonify(None)
+            
+        d = data[0]
+        
+        def format_time(seconds):
+            if not seconds or seconds <= 0:
+                return None
+            hours = seconds / 3600.0
+            if hours.is_integer():
+                return f"{int(hours)}h"
+            return f"{round(hours, 1)}h"
+            
+        return jsonify({
+            "hastily": format_time(d.get("hastily")),
+            "normally": format_time(d.get("normally")),
+            "completely": format_time(d.get("completely"))
+        })
+    except Exception as exc:
+        logging.error("get_hltb error: %s", exc)
+        return jsonify(None)
 
 
 # ── GET /api/library/<user_id> ─────────────────────────────────────────────────
@@ -1618,10 +1895,15 @@ def upsert_library(user_id: str):
     body = request.get_json(force=True)
     if not body or "game_id" not in body:
         return jsonify({"error": "game_id required"}), 400
+
     status   = body.get("status")
-    playtime = float(body.get("playtime", 0))
+    # Enforce playtime caps: 0–200 h total per game (server-side guard)
+    playtime = min(float(body.get("playtime", 0) or 0), 200.0)
+    playtime = max(playtime, 0.0)
+
     if status not in ("wishlist", "played", "playing", None):
         return jsonify({"error": f"Invalid status: {status}"}), 400
+
     conn = get_db()
     if not conn:
         return jsonify({"ok": True, "persisted": False})
@@ -1631,9 +1913,10 @@ def upsert_library(user_id: str):
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO user_library
-                        (user_id,game_id,game_name,genres,rating,status,is_liked,is_favorite,playtime,image_url)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (user_id,game_id) DO UPDATE SET
+                        (user_id, game_id, game_name, genres, rating,
+                         status, is_liked, is_favorite, playtime, image_url)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (user_id, game_id) DO UPDATE SET
                         game_name   = EXCLUDED.game_name,
                         genres      = EXCLUDED.genres,
                         rating      = EXCLUDED.rating,
@@ -1643,12 +1926,16 @@ def upsert_library(user_id: str):
                         playtime    = EXCLUDED.playtime,
                         image_url   = EXCLUDED.image_url
                 """, (
-                    user_id, int(body["game_id"]), str(body.get("game_name", "")),
+                    user_id,
+                    int(body["game_id"]),
+                    str(body.get("game_name", "")),
                     json.dumps(genres_raw if isinstance(genres_raw, list) else []),
-                    float(body.get("rating", 0)), status,
-                    float(body.get("rating", 0)), status,
-                    bool(body.get("is_liked", False)), bool(body.get("is_favorite", False)),
-                    playtime, str(body.get("image_url", "")),
+                    float(body.get("rating", 0)),
+                    status,
+                    bool(body.get("is_liked",    False)),
+                    bool(body.get("is_favorite", False)),
+                    playtime,
+                    str(body.get("image_url", "")),
                 ))
         return jsonify({"ok": True, "persisted": True})
     except Exception as exc:

@@ -37,15 +37,16 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft, Bookmark, Play, Heart, Star, Search, X,
   Trash2, Sparkles, Library, TrendingUp, Gamepad2, Award,
-  Gamepad, Plus, Clock, AlertTriangle, ChevronDown,
+  Gamepad, Plus, Clock, AlertTriangle, ChevronDown, CheckCircle2,
 } from "lucide-react";
 import {
   truncate, ratingColor, XP_EVENTS,
   getLevel, getTitle, getXpProgress,
   computeDNAScores, normaliseDNA, DNA_GENRES,
+  MAX_HOURS_PER_ENTRY, MAX_HOURS_PER_GAME_XP, calcHoursXp,
 } from "./shared.js";
 import { persistLibraryItemFS } from "./firebaseLibrary.js";
-import DNABlade      from "./DNABlade.jsx";
+import DNABlade from "./DNABlade.jsx";
 
 /* ── DNA offset helper (mirrors App.jsx) ────────────────────────────────────── */
 function applyDnaOffsets(library, offsets) {
@@ -69,13 +70,13 @@ function groupEntriesByYear(entries) {
     .sort((a, b) => (a === "Unknown" ? 1 : b === "Unknown" ? -1 : b - a))
     .map(year => {
       const list = byYear[year];
-      
+
       // 1. Sort the entire list by rating first
       const sorted = [...list].sort((a, b) => (b.game?.rating ?? 0) - (a.game?.rating ?? 0));
-      
+
       // 2. Take top 4
       const topHits = sorted.slice(0, 4);
-      
+
       // 3. THE CRITICAL FIX: Ensure ID comparison is type-agnostic (force to String)
       const topIds = new Set(topHits.map(e => String(e.game.id)));
       const rest = list.filter(e => !topIds.has(String(e.game.id)));
@@ -89,17 +90,17 @@ function groupEntriesByYear(entries) {
 
 /* ── Tab config ──────────────────────────────────────────────────────────────── */
 const TABS = [
-  { id: "playing",   label: "Playing Now", Icon: Gamepad  },
-  { id: "wishlist",  label: "Wishlist",    Icon: Bookmark },
-  { id: "played",    label: "Played",      Icon: Play     },
-  { id: "liked",     label: "Liked",       Icon: Heart    },
-  { id: "favorites", label: "Favorites",   Icon: Star     },
+  { id: "playing", label: "Playing Now", Icon: Gamepad },
+  { id: "wishlist", label: "Wishlist", Icon: Bookmark },
+  { id: "played", label: "Played", Icon: Play },
+  { id: "liked", label: "Liked", Icon: Heart },
+  { id: "favorites", label: "Favorites", Icon: Star },
 ];
 const TAB_ACCENT = {
-  playing:   "var(--accent-violet)",
-  wishlist:  "var(--accent)",
-  played:    "var(--accent-green)",
-  liked:     "var(--accent-rose)",
+  playing: "var(--accent-violet)",
+  wishlist: "var(--accent)",
+  played: "var(--accent-green)",
+  liked: "var(--accent-rose)",
   favorites: "var(--accent-amber)",
 };
 
@@ -120,19 +121,49 @@ function StatCard({ icon: Icon, label, value, accent }) {
 
 /* ── Library Game Card ───────────────────────────────────────────────────────── */
 const LibGameCard = memo(function LibGameCard({
-  entry, activeTab, onRemove, onFavorite, onAddHours, onOpenOverlay,
+  entry, activeTab, onRemove, onFavorite, onAddHours, onSetHours, onFinish, onOpenOverlay,
 }) {
-  const { game, isFavorite, playtime = 0 } = entry;
+  const { game, status, isFavorite, playtime = 0 } = entry;
   const showFavBtn = activeTab === "liked" || activeTab === "favorites";
-  const [adding,  setAdding]  = useState(false);
+
+  // Panel state
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [editMode, setEditMode] = useState(false); // false = add, true = overwrite
   const [hrInput, setHrInput] = useState("1");
+
+  const openPanel = (isEdit) => {
+    if (panelOpen && editMode === isEdit) {
+      // Same button pressed again — close the panel
+      setPanelOpen(false);
+      return;
+    }
+    setEditMode(isEdit);
+    setHrInput(isEdit ? String(playtime) : "1");
+    setPanelOpen(true);
+  };
+
+  const handleConfirm = () => {
+    const h = parseFloat(hrInput);
+    if (isNaN(h) || h < 0) return;
+    // UI-side enforcement of the 20h per-entry cap
+    const clamped = Math.min(h, MAX_HOURS_PER_ENTRY);
+    if (editMode) {
+      onSetHours(entry, clamped);
+    } else {
+      onAddHours(entry, clamped);
+    }
+    setPanelOpen(false);
+    setHrInput("1");
+  };
+
+  const inputOverCap = parseFloat(hrInput) > MAX_HOURS_PER_ENTRY;
 
   return (
     <motion.div className="lib-game-card" layout
       initial={{ opacity: 0, scale: 0.93 }} animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.93 }} transition={{ duration: 0.22 }}
     >
-      {/* Fix #8: game.background_image is now always populated from HYDRATE */}
+      {/* Cover image */}
       <div
         className="lib-card-image"
         style={{ cursor: "pointer" }}
@@ -177,56 +208,92 @@ const LibGameCard = memo(function LibGameCard({
         {game.released && (
           <p className="lib-card-released">{game.released}</p>
         )}
+
+        {/* ── Playtime / action row ── */}
         <div className="lib-card-playtime-row">
           <Clock size={11} className="lcp-icon" />
-          
-          {/* If NOT in Wishlist, show hours + add hours btn */}
+
           {status !== "wishlist" ? (
             <>
               <span className="lcp-hours">{playtime > 0 ? `${playtime}h logged` : "No hours"}</span>
-              <button className="lcp-add-btn" onClick={() => setAdding(v => !v)} title="Log hours">
+
+              {/* Add hours */}
+              <button
+                className={`lcp-add-btn ${panelOpen && !editMode ? "lcp-add-btn--active" : ""}`}
+                onClick={() => openPanel(false)}
+                title="Log additional hours"
+              >
                 <Plus size={11} />
               </button>
-              
-              {/* Green Checkmark for Playing games */}
+
+              {/* Edit / overwrite existing hours — only shown when hours > 0 */}
+              {playtime > 0 && (
+                <button
+                  className={`lcp-add-btn lcp-edit-btn ${panelOpen && editMode ? "lcp-add-btn--active" : ""}`}
+                  onClick={() => openPanel(true)}
+                  title="Edit total hours (overwrite)"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                  </svg>
+                </button>
+              )}
+
+              {/* Finish → Played (only for "playing" status) */}
               {status === "playing" && (
-                <button 
-                  className="lcp-add-btn" 
-                  style={{ color: 'var(--accent-green)', marginLeft: '4px' }} 
-                  onClick={() => onStatusChange(game.id, "played")}
-                  title="Mark Completed"
+                <button
+                  className="lcp-add-btn lcp-finish-btn"
+                  onClick={() => onFinish(entry)}
+                  title="Mark as Finished → Played"
                 >
                   <CheckCircle2 size={12} />
                 </button>
               )}
             </>
           ) : (
-            /* Button for Wishlist games */
-            <button 
-              className="lib-back-btn" 
-              style={{ padding: '3px 8px', fontSize: '9px', height: 'auto' }} 
-              onClick={() => onStatusChange(game.id, "playing")}
+            /* Wishlist: "Log Hours" opens the hours panel AND moves to playing */
+            <button
+              className={`lcp-start-btn ${panelOpen ? "lcp-start-btn--active" : ""}`}
+              onClick={() => openPanel(false)}
+              title="Log hours — moves to Playing"
             >
-              Start Playing
+              Log Hours
             </button>
           )}
         </div>
+
+        {/* ── Expandable hours input panel ── */}
         <AnimatePresence>
-          {adding && (
+          {panelOpen && (
             <motion.div className="lib-card-add-hours"
               initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }}
               exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.18 }}
               style={{ overflow: "hidden" }}
             >
-              <input type="number" min="0.5" max="100" step="0.5"
-                className="lcp-hr-input" value={hrInput}
+              <span className="lcp-panel-label">
+                {editMode
+                  ? `Set total hours (max ${MAX_HOURS_PER_ENTRY}):`
+                  : `Add hours (max ${MAX_HOURS_PER_ENTRY} per entry):`}
+              </span>
+              <input
+                type="number"
+                min="0"
+                max={MAX_HOURS_PER_ENTRY}
+                step="0.5"
+                className={`lcp-hr-input ${inputOverCap ? "lcp-hr-input--warn" : ""}`}
+                value={hrInput}
                 onChange={e => setHrInput(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && handleConfirm()}
+                autoFocus
               />
-              <button className="lcp-hr-confirm" onClick={() => {
-                const h = parseFloat(hrInput);
-                if (isNaN(h) || h <= 0) return;
-                onAddHours(entry, h); setAdding(false); setHrInput("1");
-              }}>+ Log</button>
+              <button className="lcp-hr-confirm" onClick={handleConfirm}>
+                {editMode ? "Save" : "+ Log"}
+              </button>
+              {inputOverCap && (
+                <span className="lcp-hours-warn">Max {MAX_HOURS_PER_ENTRY}h — will be capped</span>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -274,7 +341,7 @@ function ClearAllButton({ count, onClear }) {
 }
 
 /* ── Year-grouped library grid ───────────────────────────────────────────────── */
-function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAddHours, onOpenOverlay }) {
+function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAddHours, onSetHours, onFinish, onOpenOverlay }) {
   const groups = useMemo(() => groupEntriesByYear(entries), [entries]);
   if (!groups.length) return null;
 
@@ -282,16 +349,14 @@ function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAdd
     <div className="year-grouped-grid">
       {groups.map(({ year, topHits, rest }) => (
         <div key={year} className="year-group"
-          ref={el => { 
-            // Surgical Fix: Defensive check for yearRefs to avoid "red" crash
-            if (yearRefs && yearRefs.current) yearRefs.current[year] = el; 
+          ref={el => {
+            if (yearRefs && yearRefs.current) yearRefs.current[year] = el;
           }}>
           <div className="year-group-header">
             <span className="year-group-label">{year}{year !== "Unknown" ? " RELEASES" : ""}</span>
             <div className="year-group-line" />
           </div>
 
-          {/* 1. TOP HITS SECTION */}
           {topHits.length > 0 && (
             <div className="year-hits-section">
               <div className="year-subheader">
@@ -302,7 +367,8 @@ function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAdd
                   {topHits.map(entry => (
                     <LibGameCard key={entry.game.id} entry={entry} activeTab={activeTab}
                       onRemove={onRemove} onFavorite={onFavorite}
-                      onAddHours={onAddHours} onOpenOverlay={onOpenOverlay}
+                      onAddHours={onAddHours} onSetHours={onSetHours}
+                      onFinish={onFinish} onOpenOverlay={onOpenOverlay}
                     />
                   ))}
                 </AnimatePresence>
@@ -310,12 +376,11 @@ function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAdd
             </div>
           )}
 
-          {/* 2. THE REST SECTION — Fixed mapping and container */}
           {rest.length > 0 && (
             <div className="year-rest-section" style={{ marginTop: topHits.length > 0 ? '24px' : '0' }}>
               {topHits.length > 0 && (
                 <div className="year-subheader" style={{ opacity: 0.5 }}>
-                   <span>OTHER RELEASES</span>
+                  <span>OTHER RELEASES</span>
                 </div>
               )}
               <motion.div className="lib-game-grid" layout>
@@ -323,7 +388,8 @@ function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAdd
                   {rest.map(entry => (
                     <LibGameCard key={entry.game.id} entry={entry} activeTab={activeTab}
                       onRemove={onRemove} onFavorite={onFavorite}
-                      onAddHours={onAddHours} onOpenOverlay={onOpenOverlay}
+                      onAddHours={onAddHours} onSetHours={onSetHours}
+                      onFinish={onFinish} onOpenOverlay={onOpenOverlay}
                     />
                   ))}
                 </AnimatePresence>
@@ -341,34 +407,34 @@ function LibYearGrid({ entries, yearRefs, activeTab, onRemove, onFavorite, onAdd
    ════════════════════════════════════════════════════════════════════════════ */
 export default function LibraryPage({
   library, dispatch, addToast,
-  dnaWeights,    onDnaWeightsChange,
-  dnaOffsets = {}, onDnaOffsetsChange = () => {},
+  dnaWeights, onDnaWeightsChange,
+  dnaOffsets = {}, onDnaOffsetsChange = () => { },
   xp, onXpGain,
   onBack,
   onGameClick, // New prop
   user,
 }) {
-  const [activeTab,      setActiveTab]      = useState("playing");
-  const [tabSearch,      setTabSearch]      = useState({
+  const [activeTab, setActiveTab] = useState("playing");
+  const [tabSearch, setTabSearch] = useState({
     playing: "", wishlist: "", played: "", liked: "", favorites: "",
   });
   const [bladeCollapsed, setBladeCollapsed] = useState(false);
   /* Fix #4: year filter and scroll refs */
-  const [yearFilter,     setYearFilter]     = useState("all");
-  const yearRefs  = useRef({});
-  const mainRef   = useRef(null);   /* scrollable .library-main element */
+  const [yearFilter, setYearFilter] = useState("all");
+  const yearRefs = useRef({});
+  const mainRef = useRef(null);   /* scrollable .library-main element */
 
   const level = getLevel(xp);
   const title = getTitle(level);
 
   /* ── Derived data ────────────────────────────────────────────────────────── */
-  const entries  = useMemo(() => Array.from(library.values()), [library]);
+  const entries = useMemo(() => Array.from(library.values()), [library]);
 
   const tabItems = useMemo(() => ({
-    playing:   entries.filter(e => e.status === "playing"),
-    wishlist:  entries.filter(e => e.status === "wishlist"),
-    played:    entries.filter(e => e.status === "played"),
-    liked:     entries.filter(e => e.isLiked),
+    playing: entries.filter(e => e.status === "playing"),
+    wishlist: entries.filter(e => e.status === "wishlist"),
+    played: entries.filter(e => e.status === "played"),
+    liked: entries.filter(e => e.isLiked),
     favorites: entries.filter(e => e.isFavorite),
   }), [entries]);
 
@@ -407,10 +473,10 @@ export default function LibraryPage({
   /* Stats */
   const totalSaved = new Set([
     ...tabItems.wishlist.map(e => e.game.id),
-    ...tabItems.played.map(e   => e.game.id),
-    ...tabItems.playing.map(e  => e.game.id),
+    ...tabItems.played.map(e => e.game.id),
+    ...tabItems.playing.map(e => e.game.id),
   ]).size;
-  const avgRating  = entries.length
+  const avgRating = entries.length
     ? (entries.reduce((s, e) => s + (e.game.rating ?? 0), 0) / entries.length).toFixed(1)
     : "—";
   const totalHours = entries.reduce((s, e) => s + (e.playtime ?? 0), 0).toFixed(1);
@@ -441,10 +507,10 @@ export default function LibraryPage({
   const handleStatusChange = useCallback((gameId, newStatus) => {
     const entry = library.get(gameId);
     if (!entry) return;
-    
+
     // 1. Update Reducer
     dispatch({ type: "SET_STATUS", gameId, status: newStatus });
-    
+
     // 2. Sync DNA (wipes playtime if wishlist)
     const next = new Map(library);
     next.set(gameId, { ...entry, status: newStatus, playtime: newStatus === "wishlist" ? 0 : entry.playtime });
@@ -458,7 +524,7 @@ export default function LibraryPage({
       status: newStatus,
       playtime: newStatus === "wishlist" ? 0 : entry.playtime,
     });
-    
+
     addToast(newStatus === "playing" ? "Started Playing! 🎮" : "Game Completed! 🏆", "success", `st:${gameId}`);
   }, [dispatch, library, dnaOffsets, onDnaWeightsChange, addToast]);
 
@@ -472,7 +538,7 @@ export default function LibraryPage({
 
   const handleFavorite = useCallback((entry) => {
     dispatch({ type: "TOGGLE_FAVORITE", gameId: entry.game.id, game: entry.game });
-    const was  = entry.isFavorite;
+    const was = entry.isFavorite;
     const next = new Map(library);
     next.set(entry.game.id, { ...entry, isFavorite: !was, isLiked: !was ? true : entry.isLiked });
     syncDna(next);
@@ -484,30 +550,112 @@ export default function LibraryPage({
   }, [dispatch, library, addToast, syncDna]);
 
   const handleAddHours = useCallback((entry, hours) => {
-    dispatch({ type: "ADD_PLAYTIME", gameId: entry.game.id, game: entry.game, hours });
+    // Clamp to per-entry max before dispatching
+    const clamped = Math.min(Math.max(0, hours), MAX_HOURS_PER_ENTRY);
+
+    const prevPlaytime = entry.playtime ?? 0;
+    const newPlaytime = prevPlaytime + clamped;
+
+    // Status: wishlist → playing on first log; otherwise preserve current
+    const newStatus =
+      entry.status === "wishlist" ? "playing" :
+        entry.status ?? "playing";
+
+    dispatch({ type: "ADD_PLAYTIME", gameId: entry.game.id, game: entry.game, hours: clamped });
+
     persistLibraryItemFS(user?.uid, {
-      game_id:     entry.game.id,
-      game_name:   entry.game.name,
-      genres:      entry.game.genre_slugs  ?? [],
-      rating:      entry.game.rating       ?? 0,
-      status:      entry.status            ?? null,
-      is_liked:    entry.isLiked           ?? false,
-      is_favorite: entry.isFavorite        ?? false,
-      playtime:    (entry.playtime ?? 0)   + hours,
+      game_id: entry.game.id,
+      game_name: entry.game.name,
+      genres: entry.game.genre_slugs ?? [],
+      rating: entry.game.rating ?? 0,
+      status: newStatus,               // persist the resolved status
+      is_liked: entry.isLiked ?? false,
+      is_favorite: entry.isFavorite ?? false,
+      playtime: newPlaytime,
+      image_url: entry.game.background_image ?? entry.game.image_url ?? "",
     });
-    onXpGain(Math.round(hours * XP_EVENTS.hour));
-    addToast(`+${hours}h logged → DNA updated`, "xp", `pt:${entry.game.id}:${Date.now()}`);
-  }, [dispatch, addToast, onXpGain]);
+
+    // XP respects the 200h-per-game cap — only award XP for hours under the cap
+    const xpGained = calcHoursXp(prevPlaytime, newPlaytime);
+    if (xpGained > 0) onXpGain(xpGained);
+
+    addToast(
+      `+${clamped}h logged${newStatus === "playing" && entry.status === "wishlist" ? " → Now Playing!" : ""}`,
+      "xp",
+      `pt:${entry.game.id}:${Date.now()}`,
+    );
+  }, [dispatch, addToast, onXpGain, user]);
+
+  /**
+   * handleSetHours — overwrites the existing playtime (edit/correction).
+   * XP delta is calculated relative to the previous total, capped at 200h.
+   */
+  const handleSetHours = useCallback((entry, hours) => {
+    const clamped = Math.min(Math.max(0, hours), MAX_HOURS_PER_ENTRY);
+
+    const prevPlaytime = entry.playtime ?? 0;
+    const newPlaytime = clamped; // overwrite, not accumulate
+
+    const newStatus =
+      entry.status === "wishlist" ? "playing" :
+        entry.status ?? "playing";
+
+    dispatch({ type: "SET_HOURS", gameId: entry.game.id, game: entry.game, hours: clamped });
+
+    persistLibraryItemFS(user?.uid, {
+      game_id: entry.game.id,
+      game_name: entry.game.name,
+      genres: entry.game.genre_slugs ?? [],
+      rating: entry.game.rating ?? 0,
+      status: newStatus,
+      is_liked: entry.isLiked ?? false,
+      is_favorite: entry.isFavorite ?? false,
+      playtime: newPlaytime,
+      image_url: entry.game.background_image ?? entry.game.image_url ?? "",
+    });
+
+    // Award (or effectively recalculate) XP based on the new total vs old total
+    const xpGained = calcHoursXp(prevPlaytime, newPlaytime);
+    if (xpGained > 0) onXpGain(xpGained);
+
+    addToast(`Hours updated to ${clamped}h`, "xp", `seth:${entry.game.id}:${Date.now()}`);
+  }, [dispatch, addToast, onXpGain, user]);
+
+  /**
+   * handleFinish — moves a "playing" game to "played".
+   */
+  const handleFinish = useCallback((entry) => {
+    dispatch({ type: "FINISH_GAME", gameId: entry.game.id, game: entry.game });
+
+    const next = new Map(library);
+    next.set(entry.game.id, { ...entry, status: "played" });
+    syncDna(next);
+
+    persistLibraryItemFS(user?.uid, {
+      game_id: entry.game.id,
+      game_name: entry.game.name,
+      genres: entry.game.genre_slugs ?? [],
+      rating: entry.game.rating ?? 0,
+      status: "played",
+      is_liked: entry.isLiked ?? false,
+      is_favorite: entry.isFavorite ?? false,
+      playtime: entry.playtime ?? 0,
+      image_url: entry.game.background_image ?? entry.game.image_url ?? "",
+    });
+
+    onXpGain(XP_EVENTS.played);
+    addToast(`🏆 ${truncate(entry.game.name, 20)} finished!`, "played", `fin:${entry.game.id}`);
+  }, [dispatch, library, syncDna, addToast, onXpGain, user]);
 
   const handleClearTab = useCallback((tab) => {
     dispatch({ type: "CLEAR_TAB", tab });
     const next = new Map(library);
     for (const [id, e] of next.entries()) {
-      if (tab === "liked"     && e.isLiked)             next.set(id, { ...e, isLiked: false, isFavorite: false });
-      if (tab === "favorites" && e.isFavorite)          next.set(id, { ...e, isFavorite: false });
-      if (tab === "wishlist"  && e.status === "wishlist") next.set(id, { ...e, status: null });
-      if (tab === "played"    && e.status === "played")   next.set(id, { ...e, status: null });
-      if (tab === "playing"   && e.status === "playing")  next.set(id, { ...e, status: null });
+      if (tab === "liked" && e.isLiked) next.set(id, { ...e, isLiked: false, isFavorite: false });
+      if (tab === "favorites" && e.isFavorite) next.set(id, { ...e, isFavorite: false });
+      if (tab === "wishlist" && e.status === "wishlist") next.set(id, { ...e, status: null });
+      if (tab === "played" && e.status === "played") next.set(id, { ...e, status: null });
+      if (tab === "playing" && e.status === "playing") next.set(id, { ...e, status: null });
     }
     syncDna(next);
     addToast(`Cleared all ${tab} items`, "info", `clear:${tab}:${Date.now()}`);
@@ -604,14 +752,14 @@ export default function LibraryPage({
 
           {/* Stats row */}
           <section className="library-stats">
-            <StatCard icon={Library}    label="Total Saved"  value={totalSaved}               accent="var(--accent)"        />
-            <StatCard icon={Gamepad}    label="Playing Now"  value={tabItems.playing.length}  accent="var(--accent-violet)" />
-            <StatCard icon={Bookmark}   label="Wishlist"     value={tabItems.wishlist.length} accent="var(--accent)"        />
-            <StatCard icon={Play}       label="Played"       value={tabItems.played.length}   accent="var(--accent-green)"  />
-            <StatCard icon={Heart}      label="Liked"        value={tabItems.liked.length}    accent="var(--accent-rose)"   />
-            <StatCard icon={Award}      label="Favorited"    value={tabItems.favorites.length} accent="var(--accent-amber)" />
-            <StatCard icon={Clock}      label="Hours Logged" value={`${totalHours}h`}         accent="var(--accent-violet)" />
-            <StatCard icon={TrendingUp} label="Avg. Rating"  value={avgRating}                accent="var(--accent-violet)" />
+            <StatCard icon={Library} label="Total Saved" value={totalSaved} accent="var(--accent)" />
+            <StatCard icon={Gamepad} label="Playing Now" value={tabItems.playing.length} accent="var(--accent-violet)" />
+            <StatCard icon={Bookmark} label="Wishlist" value={tabItems.wishlist.length} accent="var(--accent)" />
+            <StatCard icon={Play} label="Played" value={tabItems.played.length} accent="var(--accent-green)" />
+            <StatCard icon={Heart} label="Liked" value={tabItems.liked.length} accent="var(--accent-rose)" />
+            <StatCard icon={Award} label="Favorited" value={tabItems.favorites.length} accent="var(--accent-amber)" />
+            <StatCard icon={Clock} label="Hours Logged" value={`${totalHours}h`} accent="var(--accent-violet)" />
+            <StatCard icon={TrendingUp} label="Avg. Rating" value={avgRating} accent="var(--accent-violet)" />
           </section>
 
           {/* SVM banner */}
@@ -620,7 +768,7 @@ export default function LibraryPage({
               <Sparkles size={14} />
               <span>
                 Discovery SVM trained on <strong>{tabItems.liked.length}</strong> games
-                {tabItems.playing.length   > 0 && ` · ${tabItems.playing.length} playing`}
+                {tabItems.playing.length > 0 && ` · ${tabItems.playing.length} playing`}
                 {tabItems.favorites.length > 0 && ` · ${tabItems.favorites.length} favorited`}
               </span>
             </motion.div>
@@ -704,11 +852,11 @@ export default function LibraryPage({
                       </>
                     ) : (
                       <>
-                        {effectiveTab === "playing"   && <><Gamepad  size={40} opacity={0.3} /><p>Nothing playing right now.</p><span>Mark a game as Playing from the + menu.</span></>}
-                        {effectiveTab === "wishlist"  && <><Bookmark size={40} opacity={0.3} /><p>Wishlist is empty.</p><span>Hit + on any card.</span></>}
-                        {effectiveTab === "played"    && <><Play     size={40} opacity={0.3} /><p>No played games yet.</p></>}
-                        {effectiveTab === "liked"     && <><Heart    size={40} opacity={0.3} /><p>No liked games.</p><span>♥ a card to train the AI.</span></>}
-                        {effectiveTab === "favorites" && <><Star     size={40} opacity={0.3} /><p>No favorites.</p><span>★ a liked game for 3× weight.</span></>}
+                        {effectiveTab === "playing" && <><Gamepad size={40} opacity={0.3} /><p>Nothing playing right now.</p><span>Mark a game as Playing from the + menu.</span></>}
+                        {effectiveTab === "wishlist" && <><Bookmark size={40} opacity={0.3} /><p>Wishlist is empty.</p><span>Hit + on any card.</span></>}
+                        {effectiveTab === "played" && <><Play size={40} opacity={0.3} /><p>No played games yet.</p></>}
+                        {effectiveTab === "liked" && <><Heart size={40} opacity={0.3} /><p>No liked games.</p><span>♥ a card to train the AI.</span></>}
+                        {effectiveTab === "favorites" && <><Star size={40} opacity={0.3} /><p>No favorites.</p><span>★ a liked game for 3× weight.</span></>}
                       </>
                     )}
                   </div>
@@ -721,6 +869,8 @@ export default function LibraryPage({
                     onRemove={handleRemove}
                     onFavorite={handleFavorite}
                     onAddHours={handleAddHours}
+                    onSetHours={handleSetHours}
+                    onFinish={handleFinish}
                     onOpenOverlay={onGameClick}
                   />
                 ) : (
@@ -735,6 +885,8 @@ export default function LibraryPage({
                           onRemove={handleRemove}
                           onFavorite={handleFavorite}
                           onAddHours={handleAddHours}
+                          onSetHours={handleSetHours}
+                          onFinish={handleFinish}
                           onOpenOverlay={onGameClick}
                         />
                       ))}
