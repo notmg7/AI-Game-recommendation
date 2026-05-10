@@ -2312,6 +2312,7 @@ function PersistentHeader({
    DASHBOARD
    ════════════════════════════════════════════════════════════════════════════ */
 function Dashboard({
+  view,
   userMode, isLoggedIn, user,
   library, dispatch, addToast,
   onLogout, onNavigateLibrary,
@@ -2417,6 +2418,7 @@ function Dashboard({
 
   /* Infinite scroll */
   useEffect(() => {
+    if (view !== "dashboard") return;
     const s = sentinelRef.current, r = scrollRef.current;
     if (!s || !r) return;
     const obs = new IntersectionObserver(
@@ -2436,7 +2438,7 @@ function Dashboard({
     );
     obs.observe(s);
     return () => obs.disconnect();
-  }, [hasMore, loading, loadingMore, loadMore, isDiscovery, dnaWeights, appliedDnaWeights]);
+  }, [view, hasMore, loading, loadingMore, loadMore, isDiscovery, dnaWeights, appliedDnaWeights]);
 
   /* "/" shortcut */
   useEffect(() => {
@@ -2999,6 +3001,18 @@ export default function App() {
     });
   }, [addToast, playChime]);
 
+  /* Reset scroll position of any view on navigation transition */
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+    // Delayed call to ensure DOM has rendered new layout structures completely
+    const timer = setTimeout(() => {
+      document.querySelectorAll(".full-page-scroll, .main-content").forEach(el => {
+        el.scrollTo({ top: 0, behavior: "instant" });
+      });
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [view]);
+
   useEffect(() => {
     if (authLoading) return;
     if (user) {
@@ -3172,6 +3186,7 @@ export default function App() {
                       exit={{ opacity: 0, x: -20 }}
                       transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}>
                       <Dashboard
+                        view={view}
                         userMode={userMode} isLoggedIn={isLoggedIn} user={user}
                         {...sharedLib}
                         onLogout={handleLogout}
