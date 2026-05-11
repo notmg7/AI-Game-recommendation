@@ -3164,51 +3164,47 @@ export default function App() {
               overflow: "hidden", display: "flex",
             }}>
               <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-                <AnimatePresence mode="popLayout" initial={false}>
-                  {view === "dashboard" && (
-                    <motion.div key={`dashboard-${dashKey}`}
-                      style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}
-                      initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -20 }}
-                      transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}>
-                      <Dashboard
-                        userMode={userMode} isLoggedIn={isLoggedIn} user={user}
+                {view === "dashboard" && (
+                  <motion.div key={`dashboard-${dashKey}`}
+                    style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column" }}
+                    initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                    transition={{ duration: 0.2 }}>
+                    <Dashboard
+                      userMode={userMode} isLoggedIn={isLoggedIn} user={user}
+                      {...sharedLib}
+                      onLogout={handleLogout}
+                      onNavigateLibrary={() => setView("library")}
+                      dnaWeights={dnaWeights} onDnaWeightsChange={setDnaWeights}
+                      dnaOffsets={dnaOffsets}
+                      xp={xp} onXpGain={handleXpGain}
+                      muted={muted} corrupted={corrupted}
+                      siteTint={siteTint} onSiteTintChange={handleSiteTintChange}
+                      isFirstLoad={isFirstLoad}
+                      searchInput={searchInput} setSearchInput={setSearchInput}
+                      searchQuery={searchQuery} setSearchQuery={setSearchQuery}
+                      searchRef={searchRef}
+                      svmMode={svmMode} setSvmMode={setSvmMode}
+                      /* Pass full game object so modal opens instantly */
+                      onOverlayOpen={game => setOverlayGame(game)} />
+                  </motion.div>
+                )}
+                {view === "library" && (
+                  <motion.div key="library"
+                    style={{ width: "100%", height: "100%", overflow: "hidden" }}
+                    initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                    transition={{ duration: 0.2 }}>
+                    <div className="full-page-scroll">
+                      <LibraryPage
                         {...sharedLib}
-                        onLogout={handleLogout}
-                        onNavigateLibrary={() => setView("library")}
+                        user={user}
                         dnaWeights={dnaWeights} onDnaWeightsChange={setDnaWeights}
-                        dnaOffsets={dnaOffsets}
+                        dnaOffsets={dnaOffsets} onDnaOffsetsChange={setDnaOffsets}
                         xp={xp} onXpGain={handleXpGain}
-                        muted={muted} corrupted={corrupted}
-                        siteTint={siteTint} onSiteTintChange={handleSiteTintChange}
-                        isFirstLoad={isFirstLoad}
-                        searchInput={searchInput} setSearchInput={setSearchInput}
-                        searchQuery={searchQuery} setSearchQuery={setSearchQuery}
-                        searchRef={searchRef}
-                        svmMode={svmMode} setSvmMode={setSvmMode}
-                        /* Pass full game object so modal opens instantly */
-                        onOverlayOpen={game => setOverlayGame(game)} />
-                    </motion.div>
-                  )}
-                  {view === "library" && (
-                    <motion.div key="library"
-                      style={{ width: "100%", height: "100%", overflow: "hidden" }}
-                      initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: 20 }}
-                      transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}>
-                      <div className="full-page-scroll">
-                        <LibraryPage
-                          {...sharedLib}
-                          user={user}
-                          dnaWeights={dnaWeights} onDnaWeightsChange={setDnaWeights}
-                          dnaOffsets={dnaOffsets} onDnaOffsetsChange={setDnaOffsets}
-                          xp={xp} onXpGain={handleXpGain}
-                          onBack={() => { setDashKey(k => k + 1); setView("dashboard"); }}
-                          onGameClick={game => setOverlayGame(game)} />
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                        onBack={() => { setDashKey(k => k + 1); setView("dashboard"); }}
+                        onGameClick={game => setOverlayGame(game)} />
+                    </div>
+                  </motion.div>
+                )}
               </div>
 
               <motion.div
