@@ -2312,7 +2312,6 @@ function PersistentHeader({
    DASHBOARD
    ════════════════════════════════════════════════════════════════════════════ */
 function Dashboard({
-  view,
   userMode, isLoggedIn, user,
   library, dispatch, addToast,
   onLogout, onNavigateLibrary,
@@ -2418,24 +2417,26 @@ function Dashboard({
 
   /* Infinite scroll */
   useEffect(() => {
-    if (view !== "dashboard") return; // Hibernate observer if not on dashboard
-
     const s = sentinelRef.current, r = scrollRef.current;
     if (!s || !r) return;
-
     const obs = new IntersectionObserver(
       ([e]) => {
-        if (view !== "dashboard") return;
-        // Final guard: check if the component is still the active view
-        if (e.isIntersecting && view === "dashboard" && hasMore && !loading && !loadingMore) {
+        if (e.isIntersecting && hasMore && !loading && !loadingMore) {
+          if (isDiscovery) {
+            if (JSON.stringify(dnaWeights) !== JSON.stringify(appliedDnaWeights)) {
+              setSyncPulse(true);
+              setTimeout(() => setSyncPulse(false), 2500);
+              setAppliedDnaWeights(dnaWeights);
+            }
+          }
           loadMore();
         }
       },
-      { root: r, rootMargin: "0px 0px 400px 0px", threshold: 0 }
+      { root: r, rootMargin: "0px 0px 140px 0px", threshold: 0 }
     );
     obs.observe(s);
     return () => obs.disconnect();
-  }, [view, hasMore, loading, loadingMore, loadMore]);
+  }, [hasMore, loading, loadingMore, loadMore, isDiscovery, dnaWeights, appliedDnaWeights]);
 
   /* "/" shortcut */
   useEffect(() => {
@@ -2998,19 +2999,6 @@ export default function App() {
     });
   }, [addToast, playChime]);
 
-  /* Navigation Guard & Scroll Reset on View Transitions */
-  useEffect(() => {
-    // 1. Force-reset all possible internal scroll containers
-    const containers = document.querySelectorAll('.main-content, .full-page-scroll, .library-main');
-    containers.forEach(el => {
-      el.scrollTo({ top: 0, behavior: 'instant' });
-    });
-
-    // 2. Clear lingering state
-    setOverlayGame(null);
-    handleClearSearch();
-  }, [view]);
-
   useEffect(() => {
     if (authLoading) return;
     if (user) {
@@ -3045,7 +3033,7 @@ export default function App() {
   const handleToggleMute = useCallback(() => setMuted(v => { if (!v) playSad?.(); return !v; }), [playSad]);
   const handleSiteTintChange = useCallback(t => setSiteTint(t), []);
   const handleSearch = e => { e?.preventDefault(); setSearchQuery(searchInput.trim()); };
-  function handleClearSearch() { setSearchInput(""); setSearchQuery(""); }
+  const handleClearSearch = () => { setSearchInput(""); setSearchQuery(""); };
 
   const handleEnter = async (action, email, password, extra) => {
     try {
@@ -3184,7 +3172,6 @@ export default function App() {
                       exit={{ opacity: 0, x: -20 }}
                       transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}>
                       <Dashboard
-                        view={view}
                         userMode={userMode} isLoggedIn={isLoggedIn} user={user}
                         {...sharedLib}
                         onLogout={handleLogout}

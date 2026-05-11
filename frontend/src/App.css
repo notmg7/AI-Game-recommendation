@@ -331,7 +331,6 @@ img {
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--bg-base);
-  scroll-behavior: smooth;
 }
 
 /* ── Corrupted mode ── */
@@ -1517,7 +1516,6 @@ img {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  scroll-behavior: smooth;
 }
 
 .content-statusbar {

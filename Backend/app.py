@@ -380,6 +380,37 @@ def get_igdb_headers():
         "Accept":        "application/json",
     }
 
+def igdb_post(endpoint: str, data: str, timeout: int = 10) -> requests.Response:
+    """
+    Execute a POST request to IGDB with automatic 429 rate-limiting retries
+    and exponential backoff for transient server errors (5xx) or exceptions.
+    """
+    url = f"{IGDB_BASE}/{endpoint}" if not endpoint.startswith("http") else endpoint
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            headers = get_igdb_headers()
+            resp = requests.post(url, headers=headers, data=data, timeout=timeout)
+            if resp.status_code == 429:
+                retry_after = float(resp.headers.get("Retry-After", 0.3)) or (0.3 * (2 ** attempt))
+                logging.warning("IGDB 429 rate limit hit on /%s. Retrying in %.2fs... (attempt %d/%d)", endpoint, retry_after, attempt + 1, max_retries)
+                time.sleep(retry_after)
+                continue
+            if resp.status_code >= 500 and attempt < max_retries - 1:
+                backoff = 0.5 * (2 ** attempt) + random.uniform(0.1, 0.3)
+                logging.warning("IGDB %d error on /%s. Retrying in %.2fs... (attempt %d/%d)", resp.status_code, endpoint, backoff, attempt + 1, max_retries)
+                time.sleep(backoff)
+                continue
+            return resp
+        except requests.exceptions.RequestException as exc:
+            if attempt < max_retries - 1:
+                backoff = 0.5 * (2 ** attempt) + random.uniform(0.1, 0.3)
+                logging.warning("IGDB request exception on /%s (%s). Retrying in %.2fs... (attempt %d/%d)", endpoint, exc, backoff, attempt + 1, max_retries)
+                time.sleep(backoff)
+                continue
+            raise exc
+    return resp
+
 def igdb_img(img_id, size="t_720p"):
     if not img_id:
         return None
@@ -645,12 +676,7 @@ def _batch_popular_games(igdb_field: str, ids: list, limit_per: int = 3) -> dict
     body = "\n\n".join(sub_queries)
 
     try:
-        resp = requests.post(
-            f"{IGDB_BASE}/multiquery",
-            headers=get_igdb_headers(),
-            data=body,
-            timeout=15,
-        )
+        resp = igdb_post("multiquery", body, timeout=15)
         if not resp.ok:
             logging.warning("multiquery failed: HTTP %s", resp.status_code)
             return {}
@@ -787,12 +813,7 @@ def _fetch_discovery_pool(gw: dict, exclude_ids: list, now_ts: int, page: int = 
     body = "\n\n".join(sub_queries)
 
     try:
-        resp = requests.post(
-            f"{IGDB_BASE}/multiquery",
-            headers=get_igdb_headers(),
-            data=body,
-            timeout=18,
-        )
+        resp = igdb_post("multiquery", body, timeout=18)
         if not resp.ok:
             logging.warning(
                 "_fetch_discovery_pool: IGDB HTTP %s — %s",
@@ -1053,7 +1074,7 @@ def _hub_platforms() -> list:
         "where platform_logo != null; "
         "sort generation desc; limit 50;"
     )
-    resp = requests.post(f"{IGDB_BASE}/platforms", headers=get_igdb_headers(), data=q, timeout=12)
+    resp = igdb_post("platforms", q, timeout=12)
     if not resp.ok:
         return []
     platforms = resp.json()
@@ -1087,8 +1108,8 @@ def _hub_genres() -> list:
     priority_themes = [19, 21, 38, 18, 1]
 
     headers = get_igdb_headers()
-    g_resp  = requests.post(f"{IGDB_BASE}/genres", headers=headers, data="fields id, name, slug; limit 50;", timeout=10)
-    t_resp  = requests.post(f"{IGDB_BASE}/themes", headers=headers, data="fields id, name, slug; limit 50;", timeout=10)
+    g_resp  = igdb_post("genres", "fields id, name, slug; limit 50;", timeout=10)
+    t_resp  = igdb_post("themes", "fields id, name, slug; limit 50;", timeout=10)
     genres_raw = g_resp.json() if g_resp.ok else []
     themes_raw = t_resp.json() if t_resp.ok else []
 
@@ -1133,7 +1154,7 @@ def _hub_companies(is_developer: bool) -> list:
         f"where (id = ({ids_str})) | (logo != null & {role_field} != null); "
         f"sort {role_field} desc; limit 100;"
     )
-    resp = requests.post(f"{IGDB_BASE}/companies", headers=get_igdb_headers(), data=q, timeout=12)
+    resp = igdb_post("companies", q, timeout=12)
     if not resp.ok:
         return []
     companies   = resp.json()
@@ -1165,7 +1186,7 @@ def _hub_companies(is_developer: bool) -> list:
 
 def _hub_themes() -> list:
     q    = "fields id, name, slug; limit 50;"
-    resp = requests.post(f"{IGDB_BASE}/themes", headers=get_igdb_headers(), data=q, timeout=10)
+    resp = igdb_post("themes", q, timeout=10)
     if not resp.ok:
         return []
     themes     = resp.json()
@@ -1276,7 +1297,7 @@ def search_suggestions():
     query_body = f'{fields} where (name ~ *"{q_clean}"* | alternative_names.name ~ *"{q_clean}"* | slug ~ *"{q_clean}"*) & cover != null; sort aggregated_rating_count desc; limit 7;'
 
     try:
-        resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query_body, timeout=10)
+        resp = igdb_post("games", query_body, timeout=10)
         resp.raise_for_status()
         raw_data = resp.json()
     except Exception as exc:
@@ -1496,7 +1517,7 @@ def get_games():
     query_body = f"{fields} {where_clause} {sort_clause} {pagination_clause}"
 
     try:
-        resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query_body, timeout=12)
+        resp = igdb_post("games", query_body, timeout=12)
         resp.raise_for_status()
         raw_data = resp.json()
     except Exception as exc:
@@ -1560,7 +1581,7 @@ def get_game(game_id: int):
         f"where id = {game_id};"
     )
     try:
-        resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=query, timeout=10)
+        resp = igdb_post("games", query, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         if not data:
@@ -1776,7 +1797,7 @@ def get_screenshots(game_id: int):
         cover_image_id = None
         try:
             g_query = f"fields cover.image_id; where id = {game_id};"
-            g_resp = requests.post(f"{IGDB_BASE}/games", headers=get_igdb_headers(), data=g_query, timeout=5)
+            g_resp = igdb_post("games", g_query, timeout=5)
             if g_resp.ok:
                 g_json = g_resp.json()
                 if g_json:
@@ -1786,7 +1807,7 @@ def get_screenshots(game_id: int):
 
         # 2. Fetch screenshots
         query = f"fields image_id; where game = {game_id}; limit 8;"
-        resp = requests.post(f"{IGDB_BASE}/screenshots", headers=get_igdb_headers(), data=query, timeout=10)
+        resp = igdb_post("screenshots", query, timeout=10)
         resp.raise_for_status()
         screenshots_data = resp.json()
 
@@ -1822,7 +1843,7 @@ def get_screenshots(game_id: int):
 def get_stores(game_id: int):
     query = f"fields category, url; where game = {game_id} & category = (1, 5, 13, 16, 17);"
     try:
-        resp = requests.post(f"{IGDB_BASE}/websites", headers=get_igdb_headers(), data=query, timeout=10)
+        resp = igdb_post("websites", query, timeout=10)
         resp.raise_for_status()
         cat_map = {13: 1, 16: 11, 17: 5}
         stores  = []
@@ -1845,7 +1866,7 @@ def get_hltb(game_id: int):
     try:
         headers = get_igdb_headers()
         query = f"fields hastily, normally, completely; where game_id = {game_id};"
-        resp = requests.post(f"{IGDB_BASE}/game_time_to_beats", headers=headers, data=query, timeout=5)
+        resp = igdb_post("game_time_to_beats", query, timeout=5)
         if not resp.ok:
             return jsonify(None)
         

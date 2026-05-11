@@ -233,15 +233,17 @@ export const libraryReducer = (state, action) => {
   };
 
   switch (action.type) {
-    case "SET_STATUS":
+    case "SET_STATUS": {
+      const resolvedGame = action.game ?? current.game;
+      if (!resolvedGame) return new Map(state); // guard: no game object = no-op
       next.set(gameId, {
         ...current,
-        game: action.game ?? current.game,
+        game: resolvedGame,
         status: action.status,
-        // Reset playtime when moving back to wishlist
         playtime: action.status === "wishlist" ? 0 : current.playtime,
       });
       break;
+    }
 
     case "ADD_PLAYTIME": {
       // Clamp the incoming hours to the per-entry maximum (anti-cheese)
@@ -334,18 +336,20 @@ export const libraryReducer = (state, action) => {
     }
 
     case "HYDRATE": {
-      next.clear();
+      const hydrateNext = new Map(state);
+      hydrateNext.clear();
       for (const row of (action.rows ?? [])) {
+        if (!row || row.game_id == null) continue;
         let slugs = [];
         try {
           slugs = typeof row.genres === "string"
             ? JSON.parse(row.genres || "[]")
             : (Array.isArray(row.genres) ? row.genres : []);
         } catch { slugs = []; }
-        next.set(row.game_id, {
+        hydrateNext.set(row.game_id, {
           game: {
             id: row.game_id,
-            name: row.game_name,
+            name: row.game_name ?? "",
             genre_slugs: slugs,
             rating: row.rating ?? null,
             image_url: row.image_url ?? null,
@@ -358,9 +362,9 @@ export const libraryReducer = (state, action) => {
           playtime: row.playtime ?? 0,
         });
       }
-      break;
+      return hydrateNext;
     }
-    default: return state;
+    default: return new Map(state);
   }
   return next;
 };
@@ -482,7 +486,26 @@ export function useInfiniteGames({
       setTotalCount(data.count ?? 0);
       setHasMore(Boolean(data.next));
       setSvmMode(data.svm_mode ?? "raw");
-      setGames(prev => isReset ? data.results : [...prev, ...data.results]);
+      setGames(prev => {
+        const results = data.results ?? [];
+        if (isReset) {
+          const seen = new Set();
+          return results.filter(g => {
+            if (!g || g.id == null) return false;
+            if (seen.has(g.id)) return false;
+            seen.add(g.id);
+            return true;
+          });
+        }
+        const seen = new Set(prev.map(g => g.id));
+        const newGames = results.filter(g => {
+          if (!g || g.id == null) return false;
+          if (seen.has(g.id)) return false;
+          seen.add(g.id);
+          return true;
+        });
+        return [...prev, ...newGames];
+      });
     } catch (e) {
       if (myKey !== fetchKeyRef.current) return;
       setError(e.message);
