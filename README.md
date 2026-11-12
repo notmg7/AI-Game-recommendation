@@ -117,9 +117,58 @@ A four-tier architecture separates the UI, data, machine learning and external d
 
 ---
 
-## 🔒 Source Code
+## 🚀 Getting Started
 
-This was a university project, so the source code is private. **Code walkthroughs are available on request.** Feel free to reach out.
+### Prerequisites
+- Python 3.10+ and Node.js 18+
+- A [Twitch developer app](https://dev.twitch.tv/console) for IGDB API access
+- A [Firebase](https://console.firebase.google.com) project with Authentication and Firestore enabled
+
+### 1. Backend (Flask)
+```bash
+cd Backend
+python -m venv venv
+venv\Scripts\activate          # Windows  (macOS/Linux: source venv/bin/activate)
+pip install -r requirements.txt
+```
+- Copy `.env.example` to `.env` and add your Twitch Client ID and Secret.
+- In Firebase Console → Project Settings → Service Accounts, generate a private key and save it as `Backend/serviceAccountKey.json`.
+
+```bash
+python app.py                    # runs on http://127.0.0.1:5000
+```
+
+### 2. Frontend (React + Vite)
+```bash
+cd frontend
+npm install
+npm run dev                      # opens on http://localhost:5173
+```
+To use your own Firebase project, replace the config in `frontend/src/firebase.js`.
+
+> 🔐 `.env` and `serviceAccountKey.json` are git-ignored and must never be committed.
+
+---
+
+## 📁 Project Structure
+
+```
+├── Backend/
+│   ├── app.py              # Flask API: IGDB integration, SVM training and Match Score inference
+│   ├── requirements.txt
+│   └── .env.example
+├── frontend/
+│   └── src/
+│       ├── App.jsx           # Main app: Browse feed, Discovery Hub, authentication
+│       ├── DNABlade.jsx      # Gamer DNA radar visualisation
+│       ├── GameDetailOverlay.jsx
+│       ├── LibraryPage.jsx   # Five-category library and playtime logging
+│       ├── firebase.js       # Firebase configuration
+│       └── useAuth.js        # Authentication helpers
+└── images/                 # Screenshots used in this README
+```
+
+---
 
 ## 👤 Author
 
